@@ -1501,6 +1501,76 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
             "git_ops": sess.get("git_ops", []),
         })
 
+    # ── Enrich from history: add sessions missing from transcripts ─────────
+    if history:
+        history_by_session = defaultdict(list)
+        for entry in history:
+            if entry["display"].startswith("/"):
+                continue
+            history_by_session[entry["sessionId"]].append(entry)
+
+        existing_sids = set(sessions.keys())
+        for sid, entries in history_by_session.items():
+            if sid in existing_sids:
+                continue
+            entries_sorted = sorted(entries, key=lambda e: e["timestamp"])
+            start_ts = entries_sorted[0]["timestamp"]
+            end_ts = entries_sorted[-1]["timestamp"]
+            start_dt = datetime.fromtimestamp(start_ts / 1000, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(end_ts / 1000, tz=timezone.utc)
+            date_str = start_dt.strftime("%Y-%m-%d")
+            hour = start_dt.hour
+            weekday = start_dt.weekday()
+            duration_s = (end_ts - start_ts) / 1000
+            user_msg_count = len(entries_sorted)
+            first_prompt = entries_sorted[0]["display"][:200]
+            proj_name = project_display_name(entries_sorted[0].get("project", ""))
+
+            total_messages += user_msg_count
+            ps = project_stats[proj_name]
+            ps["sessions"] += 1
+            ps["messages"] += user_msg_count
+            daily_messages[date_str] += user_msg_count
+            daily_sessions[date_str] += 1
+            hourly_messages[hour] += user_msg_count
+            weekday_messages[weekday] += user_msg_count
+
+            session_list.append({
+                "session_id": sid,
+                "project": proj_name,
+                "project_dir": "",
+                "date": date_str,
+                "start": start_dt.isoformat(),
+                "end": end_dt.isoformat(),
+                "duration_min": round(duration_s / 60, 1),
+                "cost": 0,
+                "messages": user_msg_count,
+                "user_messages": user_msg_count,
+                "assistant_messages": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "api_calls": 0,
+                "primary_model": "Unknown",
+                "model_breakdown": {},
+                "tools": {},
+                "skills": {},
+                "hooks": {},
+                "compactions": 0,
+                "compaction_events": [],
+                "first_prompt": first_prompt,
+                "slug": "",
+                "file_size_mb": 0,
+                "agent_dispatches": [],
+                "subagents": [],
+                "error_count": 0,
+                "errors": [],
+                "file_ops_count": 0,
+                "git_ops": [],
+                "from_history": True,
+            })
+
     session_list.sort(key=lambda s: s["start"])
 
     all_dates = sorted(set(
@@ -1677,6 +1747,7 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
             "total_input_tokens": total_input,
             "total_cache_read_tokens": total_cache_read,
             "total_cache_write_tokens": total_cache_write,
+            "total_prompts": len(history) if history else 0,
             "first_session": all_dates[0] if all_dates else "",
             "last_session": all_dates[-1] if all_dates else "",
             "total_projects": len(project_list),
@@ -3692,16 +3763,34 @@ def build_session_flow(messages):
     return {"agents": agents, "events": events, "edges": edges}
 
 
-def generate_session_pages(sessions, session_list):
+def generate_session_pages(sessions, session_list, history=None):
     """Generate individual HTML pages for each session."""
     sessions_dir = OUTPUT_DIR / "sessions"
     sessions_dir.mkdir(exist_ok=True)
+
+    # Index history by sessionId for history-only sessions
+    history_by_session = defaultdict(list)
+    if history:
+        for entry in history:
+            history_by_session[entry["sessionId"]].append(entry)
 
     count = 0
     for sess_data in session_list:
         sid = sess_data["session_id"]
         project_dir = sess_data.get("project_dir", "")
         messages = extract_session_messages(sid, project_dir)
+
+        # For history-only sessions, build synthetic messages from history
+        if not messages and sess_data.get("from_history") and sid in history_by_session:
+            for entry in sorted(history_by_session[sid], key=lambda e: e["timestamp"]):
+                if entry["display"].startswith("/"):
+                    continue
+                ts = datetime.fromtimestamp(entry["timestamp"] / 1000, tz=timezone.utc)
+                messages.append({
+                    "role": "user",
+                    "content": entry["display"],
+                    "timestamp": ts.isoformat(),
+                })
 
         if not messages:
             continue
@@ -5794,7 +5883,7 @@ def main():
     print(f"  Size: {DASHBOARD_HTML.stat().st_size / 1024:.1f} KB")
 
     print(f"\nGenerating session pages...")
-    generate_session_pages(sessions, data["sessions"])
+    generate_session_pages(sessions, data["sessions"], history=history)
 
     print(f"\nGenerating project pages...")
     project_slugs = generate_project_pages(data["sessions"], data=data)
