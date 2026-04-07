@@ -1995,7 +1995,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .heatmap-grid { display:flex; gap:2px; }
 .heatmap-col { display:flex; flex-direction:column; gap:2px; }
 .heatmap-cell { width:13px; height:13px; border-radius:2px; position:relative; }
-.heatmap-cell:hover::after { content:attr(data-tip); position:absolute; bottom:18px; left:50%; transform:translateX(-50%); background:var(--bg2); border:1px solid var(--border); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap; z-index:10; color:var(--text); pointer-events:none; }
+.heatmap-cell:hover::after { content:attr(data-tip); position:absolute; bottom:5px; left:50%; transform:translateX(-50%); background:var(--bg2); border:1px solid var(--border); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap; z-index:10; color:var(--text); pointer-events:none; }
 .heatmap-labels { display:flex; flex-direction:column; gap:2px; margin-right:4px; padding-top:18px; }
 .heatmap-labels span { height:13px; font-size:10px; color:var(--text2); line-height:13px; }
 .heatmap-legend { display:flex; align-items:center; gap:4px; margin-top:8px; justify-content:flex-end; font-size:11px; color:var(--text2); }
