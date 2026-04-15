@@ -1134,9 +1134,9 @@ def extract_session_messages(session_id, project_dir_name):
                         elif block.get("type") == "tool_use":
                             tool_name = block.get("name", "")
                             tool_input = block.get("input", {})
-                            tool_info = {"name": tool_name}
+                            tool_info = {"name": tool_name, "input": tool_input}
                             if tool_name == "Bash":
-                                tool_info["detail"] = tool_input.get("command", "")[:200]
+                                tool_info["detail"] = tool_input.get("command", "")
                             elif tool_name in ("Read", "Edit", "Write"):
                                 tool_info["detail"] = tool_input.get("file_path", "")
                             elif tool_name in ("Grep", "Glob"):
@@ -1144,9 +1144,9 @@ def extract_session_messages(session_id, project_dir_name):
                             elif tool_name == "Skill":
                                 tool_info["detail"] = tool_input.get("skill", "")
                             elif tool_name == "Agent":
-                                tool_info["detail"] = tool_input.get("description", "")[:100]
+                                tool_info["detail"] = tool_input.get("description", "")
                                 tool_info["agent_type"] = tool_input.get("subagent_type", "general-purpose")
-                                tool_info["agent_prompt"] = tool_input.get("prompt", "")[:2000]
+                                tool_info["agent_prompt"] = tool_input.get("prompt", "")
                             tools.append(tool_info)
 
                 text = "\n".join(text_parts)
@@ -3655,8 +3655,12 @@ a:hover { text-decoration:underline; }
 .msg-content code { background:var(--bg); padding:1px 4px; border-radius:3px; font-size:12px; }
 .msg-content pre { background:var(--bg); border-radius:6px; padding:12px; margin:8px 0; overflow-x:auto; }
 .msg-content pre code { background:transparent; padding:0; }
-.msg-tools { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
-.tool-badge { background:var(--bg); padding:2px 8px; border-radius:4px; font-size:11px; color:var(--cyan); font-family:monospace; border:1px solid var(--border); max-width:350px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.msg-tools { display:flex; flex-direction:column; gap:4px; margin-top:8px; }
+.tool-badge { background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:11px; font-family:monospace; overflow:hidden; cursor:pointer; display:inline-flex; flex-direction:column; align-self:flex-start; }
+.tool-badge.has-input { border-style:dashed; }
+.tool-badge .tool-name { padding:2px 8px; color:var(--cyan); font-weight:600; background:var(--bg2); border-bottom:1px solid var(--border); }
+.tool-badge .tool-detail { padding:2px 8px; color:var(--text); white-space:pre-wrap; word-break:break-word; }
+.tool-input-popup { display:none; position:fixed; z-index:1000; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:12px; max-width:700px; max-height:500px; overflow-y:auto; font-size:12px; font-family:monospace; white-space:pre-wrap; word-break:break-word; color:var(--text); box-shadow:0 8px 32px rgba(0,0,0,0.4); }
 .msg-expand { color:var(--accent2); cursor:pointer; font-size:12px; margin-top:4px; }
 .marker { padding:6px 16px; margin-bottom:8px; font-size:11px; border-radius:6px; display:flex; align-items:center; gap:8px; }
 .marker.hook { background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); color:var(--amber); }
@@ -3769,14 +3773,54 @@ msgs.forEach((m,i) => {
       '</div>' +
       '<div class="msg-content" id="mc'+i+'">'+renderMd(display)+'</div>' +
       (isLong ? '<div class="msg-expand" data-idx="'+i+'">Show full message ('+(m.content.length/1000).toFixed(1)+'K chars)</div>' : '') +
-      (m.tools && m.tools.length>0 ? '<div class="msg-tools">'+m.tools.map(t =>
-        '<span class="tool-badge"'+(t.name==='Agent'?' style="background:rgba(99,102,241,0.15);color:var(--accent2);border-color:var(--accent)"':'')+'>'
-        +escHtml(t.name)+(t.detail ? ' '+escHtml(t.detail) : '')+'</span>'
-      ).join('')+'</div>' : '') +
+      (m.tools && m.tools.length>0 ? '<div class="msg-tools">'+m.tools.map((t,ti) => {
+        const hasInput = t.input && Object.keys(t.input).length > 0;
+        const inputJson = hasInput ? JSON.stringify(t.input, null, 2) : '';
+        const isAgent = t.name === 'Agent';
+        const dataAttr = hasInput ? ' data-tool-input="'+escHtml(inputJson)+'"' : '';
+        const cls = 'tool-badge'+(hasInput?' has-input':'');
+        const nameStyle = isAgent ? ' style="color:var(--accent2);background:rgba(99,102,241,0.2)"' : '';
+        const borderStyle = isAgent ? ' style="border-color:var(--accent)"' : '';
+        return '<span class="'+cls+'"'+borderStyle+dataAttr+'>'
+          +'<span class="tool-name"'+nameStyle+'>'+escHtml(t.name)+'</span>'
+          +(t.detail ? '<span class="tool-detail">'+escHtml(t.detail)+'</span>' : '')
+          +'</span>';
+      }).join('')+'</div>' : '') +
     '</div>';
   }
 });
 chatEl.innerHTML = chatHtml;
+
+// Tool input popup
+const toolPopup = document.createElement('div');
+toolPopup.className = 'tool-input-popup';
+document.body.appendChild(toolPopup);
+let activeToolBadge = null;
+document.addEventListener('click', function(e) {
+  const badge = e.target.closest('.tool-badge.has-input');
+  if (badge) {
+    e.stopPropagation();
+    if (activeToolBadge === badge) {
+      toolPopup.style.display = 'none';
+      activeToolBadge = null;
+      return;
+    }
+    activeToolBadge = badge;
+    toolPopup.textContent = badge.getAttribute('data-tool-input');
+    const rect = badge.getBoundingClientRect();
+    const popupW = 700, popupH = 300;
+    let left = rect.left;
+    let top = rect.bottom + 4;
+    if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
+    if (top + popupH > window.innerHeight - 8) top = rect.top - popupH - 4;
+    toolPopup.style.left = left + 'px';
+    toolPopup.style.top = top + 'px';
+    toolPopup.style.display = 'block';
+  } else if (!e.target.closest('.tool-input-popup')) {
+    toolPopup.style.display = 'none';
+    activeToolBadge = null;
+  }
+});
 
 // Expand handlers
 document.querySelectorAll('.msg-expand').forEach(el => {
