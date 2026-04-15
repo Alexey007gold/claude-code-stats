@@ -1080,109 +1080,141 @@ def extract_session_messages(session_id, project_dir_name):
         return messages
 
     with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        raw_lines = f.readlines()
 
-            msg_type = obj.get("type")
-            timestamp = obj.get("timestamp", "")
+    # Pre-pass: collect tool results keyed by tool_use_id
+    tool_results_by_id = {}
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") == "user":
+            _content = obj.get("message", {}).get("content", [])
+            if isinstance(_content, list):
+                for _blk in _content:
+                    if isinstance(_blk, dict) and _blk.get("type") == "tool_result":
+                        _tid = _blk.get("tool_use_id", "")
+                        _raw = _blk.get("content", "")
+                        if isinstance(_raw, list):
+                            _raw = "\n".join(
+                                c.get("text", "") for c in _raw
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            )
+                        tool_results_by_id[_tid] = {
+                            "content": _raw or "",
+                            "is_error": bool(_blk.get("is_error", False)),
+                        }
 
-            if msg_type == "user":
-                message = obj.get("message", {})
-                content = message.get("content", "")
-                # Skip tool results
-                if isinstance(content, list):
-                    texts = []
-                    is_tool_result = False
-                    for block in content:
-                        if isinstance(block, dict):
-                            if block.get("type") == "tool_result":
-                                is_tool_result = True
-                                break
-                            if block.get("type") == "text":
-                                texts.append(block.get("text", ""))
-                    if is_tool_result:
-                        continue
-                    content = "\n".join(texts)
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
-                if not content or content.startswith("<command") or content.startswith("<local-command"):
-                    continue
+        msg_type = obj.get("type")
+        timestamp = obj.get("timestamp", "")
 
-                messages.append({
-                    "role": "user",
-                    "content": content,
-                    "timestamp": timestamp,
-                })
-
-            elif msg_type == "assistant":
-                message = obj.get("message", {})
-                model = message.get("model", "unknown")
-                usage = message.get("usage", {})
-                content_blocks = message.get("content", [])
-
-                text_parts = []
-                tools = []
-                for block in content_blocks:
+        if msg_type == "user":
+            message = obj.get("message", {})
+            content = message.get("content", "")
+            # Skip tool results
+            if isinstance(content, list):
+                texts = []
+                is_tool_result = False
+                for block in content:
                     if isinstance(block, dict):
+                        if block.get("type") == "tool_result":
+                            is_tool_result = True
+                            break
                         if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
-                            tool_name = block.get("name", "")
-                            tool_input = block.get("input", {})
-                            tool_info = {"name": tool_name, "input": tool_input}
-                            if tool_name == "Bash":
-                                tool_info["detail"] = tool_input.get("command", "")
-                            elif tool_name in ("Read", "Edit", "Write"):
-                                tool_info["detail"] = tool_input.get("file_path", "")
-                            elif tool_name in ("Grep", "Glob"):
-                                tool_info["detail"] = tool_input.get("pattern", "")
-                            elif tool_name == "Skill":
-                                tool_info["detail"] = tool_input.get("skill", "")
-                            elif tool_name == "Agent":
-                                tool_info["detail"] = tool_input.get("description", "")
-                                tool_info["agent_type"] = tool_input.get("subagent_type", "general-purpose")
-                                tool_info["agent_prompt"] = tool_input.get("prompt", "")
-                            tools.append(tool_info)
-
-                text = "\n".join(text_parts)
-                if not text and not tools:
+                            texts.append(block.get("text", ""))
+                if is_tool_result:
                     continue
+                content = "\n".join(texts)
 
+            if not content or content.startswith("<command") or content.startswith("<local-command"):
+                continue
+
+            messages.append({
+                "role": "user",
+                "content": content,
+                "timestamp": timestamp,
+            })
+
+        elif msg_type == "assistant":
+            message = obj.get("message", {})
+            model = message.get("model", "unknown")
+            usage = message.get("usage", {})
+            content_blocks = message.get("content", [])
+
+            text_parts = []
+            tools = []
+            for block in content_blocks:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        tool_name = block.get("name", "")
+                        tool_input = block.get("input", {})
+                        tool_use_id = block.get("id", "")
+                        tool_info = {"name": tool_name, "input": tool_input}
+                        if tool_use_id and tool_use_id in tool_results_by_id:
+                            tool_info["result"] = tool_results_by_id[tool_use_id]
+                        if tool_name == "Bash":
+                            tool_info["detail"] = tool_input.get("command", "")
+                        elif tool_name in ("Read", "Edit", "Write"):
+                            tool_info["detail"] = tool_input.get("file_path", "")
+                        elif tool_name in ("Grep", "Glob"):
+                            tool_info["detail"] = tool_input.get("pattern", "")
+                        elif tool_name == "Skill":
+                            tool_info["detail"] = tool_input.get("skill", "")
+                        elif tool_name == "Agent":
+                            tool_info["detail"] = tool_input.get("description", "")
+                            tool_info["agent_type"] = tool_input.get("subagent_type", "general-purpose")
+                            tool_info["agent_prompt"] = tool_input.get("prompt", "")
+                        tools.append(tool_info)
+
+            text = "\n".join(text_parts)
+            if not text and not tools:
+                continue
+
+            messages.append({
+                "role": "assistant",
+                "content": text,
+                "model": get_model_display(model),
+                "tokens": {
+                    "input": usage.get("input_tokens", 0),
+                    "output": usage.get("output_tokens", 0),
+                    "cache_read": usage.get("cache_read_input_tokens", 0),
+                    "cache_write": usage.get("cache_creation_input_tokens", 0),
+                },
+                "cost": round(calc_cost(model, usage), 4),
+                "tools": tools,
+                "timestamp": timestamp,
+            })
+
+        elif msg_type == "progress":
+            data_obj = obj.get("data", {})
+            if data_obj.get("type") == "hook_progress":
                 messages.append({
-                    "role": "assistant",
-                    "content": text,
-                    "model": get_model_display(model),
-                    "tokens": {
-                        "input": usage.get("input_tokens", 0),
-                        "output": usage.get("output_tokens", 0),
-                        "cache_read": usage.get("cache_read_input_tokens", 0),
-                        "cache_write": usage.get("cache_creation_input_tokens", 0),
-                    },
-                    "cost": round(calc_cost(model, usage), 4),
-                    "tools": tools,
+                    "role": "hook",
+                    "hook_event": data_obj.get("hookEvent", ""),
+                    "hook_name": data_obj.get("hookName", ""),
                     "timestamp": timestamp,
                 })
 
-            elif msg_type == "progress":
-                data_obj = obj.get("data", {})
-                if data_obj.get("type") == "hook_progress":
-                    messages.append({
-                        "role": "hook",
-                        "hook_event": data_obj.get("hookEvent", ""),
-                        "hook_name": data_obj.get("hookName", ""),
-                        "timestamp": timestamp,
-                    })
-
-            elif msg_type == "summary":
-                messages.append({
-                    "role": "compaction",
-                    "timestamp": timestamp,
-                })
+        elif msg_type == "summary":
+            messages.append({
+                "role": "compaction",
+                "timestamp": timestamp,
+            })
 
     return messages
 
@@ -3895,11 +3927,23 @@ a:hover { text-decoration:underline; }
 .tool-badge.has-input { border-style:dashed; }
 .tool-badge .tool-name { padding:2px 8px; color:var(--cyan); font-weight:600; background:var(--bg2); border-bottom:1px solid var(--border); }
 .tool-badge .tool-detail { padding:2px 8px; color:var(--text); white-space:pre-wrap; word-break:break-word; }
-.tool-input-popup { display:none; position:fixed; z-index:1000; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:16px; overflow-y:auto; font-size:12px; font-family:monospace; white-space:pre-wrap; word-break:break-word; color:var(--text); box-shadow:0 8px 32px rgba(0,0,0,0.5); }
+.tool-input-popup { display:none; position:fixed; z-index:1000; inset:0; background:var(--bg2); border-radius:0; padding:16px; font-size:12px; color:var(--text); }
 .tool-input-popup-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid var(--border); font-size:12px; font-weight:600; color:var(--text2); }
 .tool-input-popup-close { cursor:pointer; font-size:16px; color:var(--text2); line-height:1; padding:2px 6px; border-radius:4px; }
 .tool-input-popup-close:hover { background:var(--bg3); color:var(--text); }
-.tool-input-popup-body { overflow-y:auto; }
+.tool-input-popup-body { overflow-y:auto; font-family:sans-serif; }
+.tp-section { font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--text2); margin:12px 0 6px; padding-bottom:4px; border-bottom:1px solid var(--border); }
+.tp-section:first-child { margin-top:0; }
+.tp-section-error { color:var(--red); border-bottom-color:var(--red); }
+.tp-field,.tp-option { font-size:12px; margin:3px 0; }
+.tp-label { color:var(--text2); font-weight:600; }
+.tp-value { color:var(--text); word-break:break-all; }
+.tp-code { background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:8px 10px; margin:4px 0 8px; font-family:monospace; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:300px; overflow-y:auto; }
+.tp-code-error { border-color:var(--red); }
+.tp-diff { display:flex; gap:8px; margin:4px 0 8px; }
+.tp-diff-col { flex:1; min-width:0; display:flex; flex-direction:column; }
+.tp-diff-before .tp-code { border-color:#7f1d1d; background:#2d1515; }
+.tp-diff-after .tp-code { border-color:#14532d; background:#152d1e; }
 .msg-expand { color:var(--accent2); cursor:pointer; font-size:12px; margin-top:4px; }
 .marker { padding:6px 16px; margin-bottom:8px; font-size:11px; border-radius:6px; display:flex; align-items:center; gap:8px; }
 .marker.hook { background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); color:var(--amber); }
@@ -4039,7 +4083,7 @@ msgs.forEach((m,i) => {
         let dataAttr = '';
         if (hasInput) {
           const idx = toolInputStore.length;
-          toolInputStore.push({name: t.name, input: t.input});
+          toolInputStore.push({name: t.name, input: t.input, result: t.result || null});
           dataAttr = ' data-tool-idx="'+idx+'"';
         }
         const cls = 'tool-badge'+(hasInput?' has-input':'');
@@ -4055,47 +4099,176 @@ msgs.forEach((m,i) => {
 });
 chatEl.innerHTML = chatHtml;
 
-// Tool input popup
+// Tool input popup formatter
+function formatToolPopup(entry) {
+  const frag = document.createDocumentFragment();
+  const inp = entry.input || {};
+  const name = entry.name || '';
+  function el(tag, cls, txt) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (txt !== undefined) e.textContent = txt;
+    return e;
+  }
+  function section(title, isError) {
+    frag.appendChild(el('div', 'tp-section' + (isError ? ' tp-section-error' : ''), title));
+  }
+  function field(label, value) {
+    if (value === undefined || value === null || value === '') return;
+    const row = el('div', 'tp-field');
+    row.appendChild(el('span', 'tp-label', label + ': '));
+    row.appendChild(el('span', 'tp-value', String(value)));
+    frag.appendChild(row);
+  }
+  function codeField(label, text) {
+    if (text === undefined || text === null || text === '') return;
+    frag.appendChild(el('div', 'tp-label', label + ':'));
+    frag.appendChild(el('pre', 'tp-code', String(text)));
+  }
+  function jsonField(label, value) {
+    if (value === undefined || value === null) return;
+    codeField(label, JSON.stringify(value, null, 2));
+  }
+  function fallback() {
+    Object.entries(inp).forEach(function(kv) {
+      const k = kv[0], v = kv[1];
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') field(k, v);
+      else jsonField(k, v);
+    });
+  }
+  section('Input');
+  const mcpMatch = name.match(/^mcp__(?:plugin_)?[^_]+__(.+)$/);
+  if (name === 'Edit') {
+    field('File', inp.file_path);
+    if (inp.replace_all) field('replace_all', 'true');
+    const diffWrap = el('div', 'tp-diff');
+    const bc = el('div', 'tp-diff-col tp-diff-before');
+    const ac = el('div', 'tp-diff-col tp-diff-after');
+    bc.appendChild(el('div', 'tp-label', 'Before:'));
+    bc.appendChild(el('pre', 'tp-code', inp.old_string != null ? String(inp.old_string) : ''));
+    ac.appendChild(el('div', 'tp-label', 'After:'));
+    ac.appendChild(el('pre', 'tp-code', inp.new_string != null ? String(inp.new_string) : ''));
+    diffWrap.appendChild(bc); diffWrap.appendChild(ac);
+    frag.appendChild(diffWrap);
+  } else if (name === 'Write') {
+    field('File', inp.file_path);
+    codeField('Content', inp.content);
+  } else if (name === 'Read') {
+    field('File', inp.file_path);
+    if (inp.offset != null || inp.limit != null) {
+      const from = inp.offset != null ? inp.offset : 0;
+      const to = inp.limit != null ? (from + inp.limit) : '\u2026';
+      field('Lines', from + '\u2013' + to);
+    }
+    if (inp.pages) field('Pages', inp.pages);
+  } else if (name === 'Bash') {
+    codeField('Command', inp.command);
+    if (inp.description) field('Description', inp.description);
+    if (inp.run_in_background) field('Background', 'true');
+    if (inp.timeout) field('Timeout', inp.timeout + 'ms');
+  } else if (name === 'Grep') {
+    field('Pattern', inp.pattern);
+    if (inp.path) field('Path', inp.path);
+    if (inp.output_mode) field('Output mode', inp.output_mode);
+    if (inp.glob) field('Glob', inp.glob);
+    if (inp.type) field('Type', inp.type);
+    ['-A','-B','-C','context'].forEach(function(k){ if (inp[k] != null) field(k, inp[k]); });
+    if (inp.multiline) field('Multiline', 'true');
+    if (inp['-i']) field('Case insensitive', 'true');
+    if (inp.head_limit != null) field('Head limit', inp.head_limit);
+  } else if (name === 'Glob') {
+    field('Pattern', inp.pattern);
+    if (inp.path) field('Path', inp.path);
+  } else if (name === 'TaskCreate') {
+    field('Subject', inp.subject);
+    if (inp.activeForm) field('Active form', inp.activeForm);
+    if (inp.description) codeField('Description', inp.description);
+  } else if (name === 'TaskUpdate') {
+    field('Task ID', inp.taskId);
+    if (inp.status) field('Status', inp.status);
+    if (inp.subject) field('Subject', inp.subject);
+    if (inp.owner) field('Owner', inp.owner);
+    if (inp.description) codeField('Description', inp.description);
+    if (inp.addBlocks) field('Blocks', JSON.stringify(inp.addBlocks));
+    if (inp.addBlockedBy) field('Blocked by', JSON.stringify(inp.addBlockedBy));
+  } else if (name === 'TaskGet' || name === 'TaskOutput' || name === 'TaskStop' || name === 'TaskList') {
+    Object.entries(inp).forEach(function(kv){ field(kv[0], String(kv[1])); });
+  } else if (name === 'Agent') {
+    field('Type', inp.subagent_type || 'general-purpose');
+    if (inp.description) field('Description', inp.description);
+    if (inp.isolation) field('Isolation', inp.isolation);
+    if (inp.model) field('Model', inp.model);
+    if (inp.prompt) codeField('Prompt', inp.prompt);
+  } else if (name === 'Skill') {
+    field('Skill', inp.skill);
+    if (inp.args) field('Args', inp.args);
+  } else if (name === 'AskUserQuestion') {
+    const qs = Array.isArray(inp.questions) ? inp.questions : [];
+    qs.forEach(function(q, qi) {
+      frag.appendChild(el('div', 'tp-field', (qi+1) + '. ' + (q.question || '')));
+      if (Array.isArray(q.options)) {
+        q.options.forEach(function(opt) {
+          const row = el('div', 'tp-option');
+          row.appendChild(el('span', 'tp-label', opt.label + ': '));
+          row.appendChild(el('span', 'tp-value', opt.description || ''));
+          frag.appendChild(row);
+        });
+      }
+    });
+  } else if (name === 'WebFetch') {
+    field('URL', inp.url);
+    if (inp.prompt) codeField('Prompt', inp.prompt);
+  } else if (name === 'WebSearch') {
+    field('Query', inp.query);
+    if (inp.allowed_domains) field('Allowed domains', inp.allowed_domains.join(', '));
+    if (inp.blocked_domains) field('Blocked domains', inp.blocked_domains.join(', '));
+  } else if (name === 'ExitPlanMode') {
+    if (inp.planFilePath) field('Plan file', inp.planFilePath);
+    if (inp.allowedPrompts && inp.allowedPrompts.length) jsonField('Allowed prompts', inp.allowedPrompts);
+  } else if (mcpMatch) {
+    Object.entries(inp).forEach(function(kv) {
+      const k = kv[0], v = kv[1];
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') field(k, v);
+      else jsonField(k, v);
+    });
+  } else {
+    fallback();
+  }
+  if (entry.result) {
+    const r = entry.result;
+    section('Result' + (r.is_error ? ' \u2014 error' : ''), r.is_error);
+    frag.appendChild(el('pre', 'tp-code' + (r.is_error ? ' tp-code-error' : ''), r.content || ''));
+  }
+  return frag;
+}
+
 const toolPopup = document.createElement('div');
 toolPopup.className = 'tool-input-popup';
-toolPopup.innerHTML = '<div class="tool-input-popup-header"><span id="popupTitle"></span><span class="tool-input-popup-close" id="popupClose">&#x2715;</span></div><pre class="tool-input-popup-body" id="popupBody"></pre>';
+toolPopup.innerHTML = '<div class="tool-input-popup-header"><span id="popupTitle"></span><span class="tool-input-popup-close" id="popupClose">&#x2715;</span></div><div class="tool-input-popup-body" id="popupBody"></div>';
 document.body.appendChild(toolPopup);
-document.getElementById('popupClose').addEventListener('click', function(e) {
-  e.stopPropagation();
-  toolPopup.style.display = 'none';
-  activeToolBadge = null;
-});
+function closePopup() { toolPopup.style.display = 'none'; activeToolBadge = null; }
+document.getElementById('popupClose').addEventListener('click', function(e) { e.stopPropagation(); closePopup(); });
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape' && toolPopup.style.display !== 'none') { closePopup(); } });
 function positionPopup() {
-  const panel = document.querySelector('.chat-panel');
-  if (!panel) return;
-  const r = panel.getBoundingClientRect();
-  const pad = 12;
-  toolPopup.style.left = (r.left + pad) + 'px';
-  toolPopup.style.top = (r.top + pad) + 'px';
-  toolPopup.style.width = (r.width - pad * 2) + 'px';
-  toolPopup.style.height = (r.height - pad * 2) + 'px';
-  document.getElementById('popupBody').style.maxHeight = (r.height - pad * 2 - 48) + 'px';
+  document.getElementById('popupBody').style.maxHeight = (window.innerHeight - 64) + 'px';
 }
 let activeToolBadge = null;
 document.addEventListener('click', function(e) {
   const badge = e.target.closest('.tool-badge.has-input');
   if (badge) {
     e.stopPropagation();
-    if (activeToolBadge === badge) {
-      toolPopup.style.display = 'none';
-      activeToolBadge = null;
-      return;
-    }
+    if (activeToolBadge === badge) { closePopup(); return; }
     activeToolBadge = badge;
     const idx = parseInt(badge.getAttribute('data-tool-idx'));
     const entry = toolInputStore[idx];
-    document.getElementById('popupTitle').textContent = (entry ? entry.name : '') + ' — input';
-    document.getElementById('popupBody').textContent = entry ? JSON.stringify(entry.input, null, 2) : '';
+    document.getElementById('popupTitle').textContent = entry ? entry.name : '';
+    const bodyEl = document.getElementById('popupBody');
+    bodyEl.textContent = '';
+    if (entry) { bodyEl.appendChild(formatToolPopup(entry)); }
     positionPopup();
     toolPopup.style.display = 'block';
   } else if (!e.target.closest('.tool-input-popup')) {
-    toolPopup.style.display = 'none';
-    activeToolBadge = null;
+    closePopup();
   }
 });
 
@@ -4229,7 +4402,7 @@ class SessionFlow {
     this.panStart = {x:0,y:0}; this.panCamStart = {x:0,y:0};
     this.userOverride = false;
     // Auto-play state
-    this.playing = true; this.playSpeed = 1;
+    this.playing = false; this.playSpeed = 1;
     this.playTime = 0; this.playIndex = 0;
     this.playDone = false;
     this.showAll = false;
