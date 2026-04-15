@@ -3748,6 +3748,7 @@ function renderMd(text) {
 // Chat panel
 const chatEl = document.getElementById('chatPanel');
 let chatHtml = '';
+const toolInputStore = [];
 msgs.forEach((m,i) => {
   if (m.role==='hook') {
     chatHtml += '<div class="marker hook"><span>&#9881;</span> Hook: '+escHtml(m.hook_name)+' <span style="margin-left:auto">'+fmtTime(m.timestamp)+'</span></div>';
@@ -3779,9 +3780,13 @@ msgs.forEach((m,i) => {
       (isLong ? '<div class="msg-expand" data-idx="'+i+'">Show full message ('+(m.content.length/1000).toFixed(1)+'K chars)</div>' : '') +
       (m.tools && m.tools.length>0 ? '<div class="msg-tools">'+m.tools.map((t,ti) => {
         const hasInput = t.input && Object.keys(t.input).length > 0;
-        const inputJson = hasInput ? JSON.stringify(t.input, null, 2) : '';
         const isAgent = t.name === 'Agent';
-        const dataAttr = hasInput ? ' data-tool-input="'+escHtml(inputJson)+'"' : '';
+        let dataAttr = '';
+        if (hasInput) {
+          const idx = toolInputStore.length;
+          toolInputStore.push({name: t.name, input: t.input});
+          dataAttr = ' data-tool-idx="'+idx+'"';
+        }
         const cls = 'tool-badge'+(hasInput?' has-input':'');
         const nameStyle = isAgent ? ' style="color:var(--accent2);background:rgba(99,102,241,0.2)"' : '';
         const borderStyle = isAgent ? ' style="border-color:var(--accent)"' : '';
@@ -3827,9 +3832,10 @@ document.addEventListener('click', function(e) {
       return;
     }
     activeToolBadge = badge;
-    const toolName = badge.querySelector('.tool-name');
-    document.getElementById('popupTitle').textContent = (toolName ? toolName.textContent : '') + ' — input';
-    document.getElementById('popupBody').textContent = badge.getAttribute('data-tool-input');
+    const idx = parseInt(badge.getAttribute('data-tool-idx'));
+    const entry = toolInputStore[idx];
+    document.getElementById('popupTitle').textContent = (entry ? entry.name : '') + ' — input';
+    document.getElementById('popupBody').textContent = entry ? JSON.stringify(entry.input, null, 2) : '';
     positionPopup();
     toolPopup.style.display = 'block';
   } else if (!e.target.closest('.tool-input-popup')) {
