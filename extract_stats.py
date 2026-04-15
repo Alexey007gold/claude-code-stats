@@ -3660,7 +3660,11 @@ a:hover { text-decoration:underline; }
 .tool-badge.has-input { border-style:dashed; }
 .tool-badge .tool-name { padding:2px 8px; color:var(--cyan); font-weight:600; background:var(--bg2); border-bottom:1px solid var(--border); }
 .tool-badge .tool-detail { padding:2px 8px; color:var(--text); white-space:pre-wrap; word-break:break-word; }
-.tool-input-popup { display:none; position:fixed; z-index:1000; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:12px; max-width:700px; max-height:500px; overflow-y:auto; font-size:12px; font-family:monospace; white-space:pre-wrap; word-break:break-word; color:var(--text); box-shadow:0 8px 32px rgba(0,0,0,0.4); }
+.tool-input-popup { display:none; position:fixed; z-index:1000; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:16px; overflow-y:auto; font-size:12px; font-family:monospace; white-space:pre-wrap; word-break:break-word; color:var(--text); box-shadow:0 8px 32px rgba(0,0,0,0.5); }
+.tool-input-popup-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid var(--border); font-size:12px; font-weight:600; color:var(--text2); }
+.tool-input-popup-close { cursor:pointer; font-size:16px; color:var(--text2); line-height:1; padding:2px 6px; border-radius:4px; }
+.tool-input-popup-close:hover { background:var(--bg3); color:var(--text); }
+.tool-input-popup-body { overflow-y:auto; }
 .msg-expand { color:var(--accent2); cursor:pointer; font-size:12px; margin-top:4px; }
 .marker { padding:6px 16px; margin-bottom:8px; font-size:11px; border-radius:6px; display:flex; align-items:center; gap:8px; }
 .marker.hook { background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); color:var(--amber); }
@@ -3794,7 +3798,24 @@ chatEl.innerHTML = chatHtml;
 // Tool input popup
 const toolPopup = document.createElement('div');
 toolPopup.className = 'tool-input-popup';
+toolPopup.innerHTML = '<div class="tool-input-popup-header"><span id="popupTitle"></span><span class="tool-input-popup-close" id="popupClose">&#x2715;</span></div><pre class="tool-input-popup-body" id="popupBody"></pre>';
 document.body.appendChild(toolPopup);
+document.getElementById('popupClose').addEventListener('click', function(e) {
+  e.stopPropagation();
+  toolPopup.style.display = 'none';
+  activeToolBadge = null;
+});
+function positionPopup() {
+  const panel = document.querySelector('.chat-panel');
+  if (!panel) return;
+  const r = panel.getBoundingClientRect();
+  const pad = 12;
+  toolPopup.style.left = (r.left + pad) + 'px';
+  toolPopup.style.top = (r.top + pad) + 'px';
+  toolPopup.style.width = (r.width - pad * 2) + 'px';
+  toolPopup.style.height = (r.height - pad * 2) + 'px';
+  document.getElementById('popupBody').style.maxHeight = (r.height - pad * 2 - 48) + 'px';
+}
 let activeToolBadge = null;
 document.addEventListener('click', function(e) {
   const badge = e.target.closest('.tool-badge.has-input');
@@ -3806,15 +3827,10 @@ document.addEventListener('click', function(e) {
       return;
     }
     activeToolBadge = badge;
-    toolPopup.textContent = badge.getAttribute('data-tool-input');
-    const rect = badge.getBoundingClientRect();
-    const popupW = 700, popupH = 300;
-    let left = rect.left;
-    let top = rect.bottom + 4;
-    if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
-    if (top + popupH > window.innerHeight - 8) top = rect.top - popupH - 4;
-    toolPopup.style.left = left + 'px';
-    toolPopup.style.top = top + 'px';
+    const toolName = badge.querySelector('.tool-name');
+    document.getElementById('popupTitle').textContent = (toolName ? toolName.textContent : '') + ' — input';
+    document.getElementById('popupBody').textContent = badge.getAttribute('data-tool-input');
+    positionPopup();
     toolPopup.style.display = 'block';
   } else if (!e.target.closest('.tool-input-popup')) {
     toolPopup.style.display = 'none';
