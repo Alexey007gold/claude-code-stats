@@ -4009,7 +4009,7 @@ a:hover { text-decoration:underline; }
 </div>
 <script>
 const S = "__SESSION_DATA__";
-const FLOW = "__FLOW_DATA__";
+const FLOW = null;
 const sess = S.session;
 const msgs = S.messages;
 const fmt = n => n.toLocaleString();
