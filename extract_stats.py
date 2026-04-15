@@ -3938,7 +3938,7 @@ a:hover { text-decoration:underline; }
 .tp-field,.tp-option { font-size:12px; margin:3px 0; }
 .tp-label { color:var(--text2); font-weight:600; }
 .tp-value { color:var(--text); word-break:break-all; }
-.tp-code { background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:8px 10px; margin:4px 0 8px; font-family:monospace; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:300px; overflow-y:auto; }
+.tp-code { background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:8px 10px; margin:4px 0 8px; font-family:monospace; font-size:11px; white-space:pre-wrap; word-break:break-word; min-height:2.5em; overflow-y:auto; }
 .tp-code-error { border-color:var(--red); }
 .tp-diff { display:flex; gap:8px; margin:4px 0 8px; }
 .tp-diff-col { flex:1; min-width:0; display:flex; flex-direction:column; }
@@ -4242,6 +4242,40 @@ function formatToolPopup(entry) {
   return frag;
 }
 
+function balanceCodeBlocks(bodyEl, budget) {
+  const codes = Array.from(bodyEl.querySelectorAll('.tp-code'));
+  if (!codes.length) return;
+  // Reset to natural height so we can measure scrollHeight
+  codes.forEach(c => { c.style.height = 'auto'; c.style.maxHeight = 'none'; });
+  void bodyEl.offsetHeight; // force reflow
+  const nH = codes.map(c => c.scrollHeight);
+  const totalN = nH.reduce((a, b) => a + b, 0);
+  const nonCode = Math.max(0, bodyEl.scrollHeight - totalN);
+  const avail = Math.max(0, budget - nonCode);
+  if (totalN <= avail) return; // everything fits naturally, no capping needed
+  // Iteratively assign natural height to blocks that fit within their equal share,
+  // then redistribute the freed space among larger blocks
+  const done = new Array(codes.length).fill(false);
+  let rem = avail;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const undone = done.filter(d => !d).length;
+    if (!undone) break;
+    const share = rem / undone;
+    for (let i = 0; i < codes.length; i++) {
+      if (!done[i] && nH[i] <= share) { done[i] = true; rem -= nH[i]; changed = true; }
+    }
+  }
+  // Remaining large blocks share leftover space proportionally to their content size
+  const bigTotal = codes.reduce((s, _, i) => done[i] ? s : s + nH[i], 0);
+  codes.forEach((c, i) => {
+    const h = done[i] ? nH[i] : (bigTotal ? Math.round(nH[i] / bigTotal * rem) : Math.round(rem / done.filter(d => !d).length));
+    c.style.height = Math.max(40, h) + 'px';
+    c.style.maxHeight = c.style.height;
+  });
+}
+
 const toolPopup = document.createElement('div');
 toolPopup.className = 'tool-input-popup';
 toolPopup.innerHTML = '<div class="tool-input-popup-header"><span id="popupTitle"></span><span class="tool-input-popup-close" id="popupClose">&#x2715;</span></div><div class="tool-input-popup-body" id="popupBody"></div>';
@@ -4264,7 +4298,10 @@ document.addEventListener('click', function(e) {
     document.getElementById('popupTitle').textContent = entry ? entry.name : '';
     const bodyEl = document.getElementById('popupBody');
     bodyEl.textContent = '';
-    if (entry) { bodyEl.appendChild(formatToolPopup(entry)); }
+    if (entry) {
+      bodyEl.appendChild(formatToolPopup(entry));
+      balanceCodeBlocks(bodyEl, parseInt(bodyEl.style.maxHeight) || (window.innerHeight - 64));
+    }
     positionPopup();
     toolPopup.style.display = 'block';
   } else if (!e.target.closest('.tool-input-popup')) {
