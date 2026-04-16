@@ -5,7 +5,17 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_PATH="$DIR/extract_stats.py"
 COMMAND="/Users/oleksii/.pyenv/shims/python $SCRIPT_PATH"
 
-CRON_SCHEDULE="*/1 * * * *"
+# Install CLI command to /usr/local/bin
+CLI_PATH="/usr/local/bin/c-stats"
+echo "Installing CLI command to $CLI_PATH..."
+sudo bash -c "cat > \"$CLI_PATH\" <<EOF
+#!/bin/bash
+$COMMAND \"\\\$@\"
+EOF"
+sudo chmod +x "$CLI_PATH"
+echo "CLI command installed: $CLI_PATH"
+
+CRON_SCHEDULE="*/30 * * * *"
 
 CRON_COMMAND="$CRON_SCHEDULE $COMMAND"
 
