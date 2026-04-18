@@ -4129,6 +4129,43 @@ function formatToolPopup(entry) {
     if (value === undefined || value === null) return;
     codeField(label, JSON.stringify(value, null, 2));
   }
+  function indentMultilineStrings(s) {
+    return s.replace(/"(?:[^"\\\\]|\\\\.)*"/g, function(m, offset) {
+      if (m.indexOf('\\\\n') < 0) return m;
+      var sol = s.lastIndexOf('\\n', offset) + 1;
+      var indent = '';
+      while (sol + indent.length < s.length && s[sol + indent.length] === ' ') indent += ' ';
+      return m.replace(/\\\\n/g, '\\n' + indent + '  ');
+    });
+  }
+  function formatResultContent(content) {
+    if (!content) return content;
+    try {
+      var parsed = JSON.parse(content);
+      if (parsed && typeof parsed === 'object') {
+        function deepUnescapeStrings(obj) {
+          if (Array.isArray(obj)) {
+            obj.forEach(function(v, i) {
+              if (typeof v === 'string') {
+                try { var inner = JSON.parse(v); if (typeof inner === 'object' && inner !== null) { obj[i] = inner; deepUnescapeStrings(obj[i]); return; } } catch(e) {}
+              } else if (typeof v === 'object' && v !== null) { deepUnescapeStrings(v); }
+            });
+          } else {
+            Object.keys(obj).forEach(function(k) {
+              if (typeof obj[k] === 'string') {
+                try { var inner = JSON.parse(obj[k]); if (typeof inner === 'object' && inner !== null) { obj[k] = inner; deepUnescapeStrings(obj[k]); return; } } catch(e) {}
+              } else if (typeof obj[k] === 'object' && obj[k] !== null) { deepUnescapeStrings(obj[k]); }
+            });
+          }
+        }
+        deepUnescapeStrings(parsed);
+      }
+      return indentMultilineStrings(JSON.stringify(parsed, null, 2)).replace(/\\\\"/g, '\\"');
+    } catch(e) {
+      var r = content.replace(/\\\\n/g, '\\n').replace(/\\\\"/g, '\\"');
+      return r.includes('\\n') ? '\\n' + r : r;
+    }
+  }
   function fallback() {
     Object.entries(inp).forEach(function(kv) {
       const k = kv[0], v = kv[1];
@@ -4237,7 +4274,7 @@ function formatToolPopup(entry) {
   if (entry.result) {
     const r = entry.result;
     section('Result' + (r.is_error ? ' \u2014 error' : ''), r.is_error);
-    frag.appendChild(el('pre', 'tp-code' + (r.is_error ? ' tp-code-error' : ''), r.content || ''));
+    frag.appendChild(el('pre', 'tp-code' + (r.is_error ? ' tp-code-error' : ''), formatResultContent(r.content || '')));
   }
   return frag;
 }
