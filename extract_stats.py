@@ -11,6 +11,7 @@ text (prompts) is escaped via textContent before display.
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -54,9 +55,12 @@ DOT_CLAUDE_JSON = Path(os.path.expanduser("~/.claude.json"))
 STATS_CACHE = CLAUDE_DIR / "stats-cache.json"
 HISTORY_JSONL = CLAUDE_DIR / "history.jsonl"
 
+SOURCE_LABEL = CONFIG.get("source_label", "current")
+
 # ── Migration Backup (optional, configured in config.json) ───────────────
 _mig = CONFIG.get("migration", {})
 MIGRATION_ENABLED = _mig.get("enabled", False)
+MIGRATION_LABEL = _mig.get("label", "migration")
 if MIGRATION_ENABLED and _mig.get("dir"):
     MIGRATION_DIR = Path(os.path.expanduser(_mig["dir"]))
     MIGRATION_CLAUDE_DIR = MIGRATION_DIR / _mig.get("claude_dir_name", ".claude-windows")
@@ -78,7 +82,8 @@ ADDITIONAL_SOURCES = []
 for _src in CONFIG.get("additional_sources", []):
     _claude_dir = Path(_src["claude_dir"])
     _dot_claude_json = Path(_src["dot_claude_json"]) if _src.get("dot_claude_json") else None
-    if _claude_dir.exists():
+    _sudo_user = _src.get("sudo_user")
+    if _sudo_user or _claude_dir.exists():
         ADDITIONAL_SOURCES.append({
             "label": _src.get("label", _claude_dir.name),
             "claude_dir": _claude_dir,
@@ -86,9 +91,94 @@ for _src in CONFIG.get("additional_sources", []):
             "dot_claude_json": _dot_claude_json,
             "stats_cache": _claude_dir / "stats-cache.json",
             "history_jsonl": _claude_dir / "history.jsonl",
+            "sudo_user": _sudo_user,
         })
 
-VERSION = "0.7.0"
+
+def _get_sudo_user_for_path(path):
+    """Look up the sudo_user for a path based on ADDITIONAL_SOURCES config."""
+    path_str = str(path)
+    for _as in ADDITIONAL_SOURCES:
+        if _as.get("sudo_user") and path_str.startswith(str(_as["claude_dir"])):
+            return _as["sudo_user"]
+    return None
+
+
+def read_text(path):
+    """Read a text file, using sudo if the path belongs to a sudo_user source."""
+    su = _get_sudo_user_for_path(path)
+    if su:
+        return sudo_read_text(path, su)
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def path_exists(path):
+    """Check if a path exists, using sudo if needed."""
+    su = _get_sudo_user_for_path(path)
+    if su:
+        return sudo_path_exists(path, su)
+    return path.exists()
+
+
+def sudo_read_text(path, sudo_user):
+    """Read a file as another user via sudo. Returns text content or None on error."""
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "-u", sudo_user, "cat", str(path)],
+            capture_output=True, text=True, timeout=30, cwd="/",
+        )
+        return r.stdout if r.returncode == 0 else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def sudo_path_exists(path, sudo_user):
+    """Check if a path exists as another user via sudo."""
+    r = subprocess.run(
+        ["sudo", "-n", "-u", sudo_user, "test", "-e", str(path)],
+        capture_output=True, timeout=5, cwd="/",
+    )
+    return r.returncode == 0
+
+
+def sudo_list_dir(path, sudo_user):
+    """List directory entries as another user. Returns list of Path objects."""
+    r = subprocess.run(
+        ["sudo", "-n", "-u", sudo_user, "find", str(path), "-maxdepth", "1", "-mindepth", "1"],
+        capture_output=True, text=True, timeout=30, cwd="/",
+    )
+    if r.returncode != 0:
+        print(f"    WARNING: sudo_list_dir failed for {path} (rc={r.returncode}): {r.stderr.strip()}")
+        return []
+    return [Path(p) for p in r.stdout.strip().split("\n") if p]
+
+
+def sudo_find_files(path, pattern, sudo_user):
+    """Find files matching a pattern as another user. Returns list of Path objects."""
+    r = subprocess.run(
+        ["sudo", "-n", "-u", sudo_user, "find", str(path), "-name", pattern, "-type", "f"],
+        capture_output=True, text=True, timeout=60, cwd="/",
+    )
+    if r.returncode != 0:
+        return []
+    return [Path(p) for p in r.stdout.strip().split("\n") if p]
+
+
+def sudo_file_size(path, sudo_user):
+    """Get file size as another user. Returns size in bytes or 0."""
+    r = subprocess.run(
+        ["sudo", "-n", "-u", sudo_user, "stat", "-c", "%s", str(path)],
+        capture_output=True, text=True, timeout=5, cwd="/",
+    )
+    try:
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+VERSION = "0.8.1"
 
 OUTPUT_DIR = Path(__file__).parent / "public"
 DASHBOARD_DATA = OUTPUT_DIR / "dashboard_data.json"
@@ -100,6 +190,12 @@ PLAN_HISTORY = CONFIG.get("plan_history", [])
 
 # ── Pricing (USD per 1M tokens) ───────────────────────────────────────────
 PRICING = {
+    # Claude 4.7
+    "claude-opus-4-7": {
+        "input": 5.00, "output": 25.00,
+        "cache_read": 0.50, "cache_write_5m": 6.25, "cache_write_1h": 10.00,
+        "display": "Opus 4.7"
+    },
     # Claude 4.6
     "claude-opus-4-6": {
         "input": 5.00, "output": 25.00,
@@ -224,16 +320,22 @@ def load_stats_cache():
         sources.append(_as["stats_cache"])
     sources.append(STATS_CACHE)
     for path in sources:
-        if path and path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # Additive merge of numeric counters
-            for key in ("totalSessions", "totalMessages"):
-                merged[key] = merged.get(key, 0) + data.get(key, 0)
-            # Keep other fields from latest source
-            for key, val in data.items():
-                if key not in ("totalSessions", "totalMessages"):
-                    merged[key] = val
+        if not path:
+            continue
+        content = read_text(path)
+        if content is None:
+            continue
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        # Additive merge of numeric counters
+        for key in ("totalSessions", "totalMessages"):
+            merged[key] = merged.get(key, 0) + data.get(key, 0)
+        # Keep other fields from latest source
+        for key, val in data.items():
+            if key not in ("totalSessions", "totalMessages"):
+                merged[key] = val
     return merged
 
 
@@ -247,11 +349,18 @@ def load_dot_claude():
         if _as["dot_claude_json"]:
             sources.append(_as["dot_claude_json"])
     sources.append(DOT_CLAUDE_JSON)
+    _dot_claude_cache = {}
     for path in sources:
-        if not path or not path.exists():
+        if not path:
             continue
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        content = read_text(path)
+        if content is None:
+            continue
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        _dot_claude_cache[str(path)] = data
         # Merge projects dict (both sources contribute)
         if "projects" in data:
             merged.setdefault("projects", {}).update(data["projects"])
@@ -262,10 +371,9 @@ def load_dot_claude():
     # Sum numStartups from both
     total_startups = 0
     for path in sources:
-        if not path or not path.exists():
+        data = _dot_claude_cache.get(str(path))
+        if not data:
             continue
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
         total_startups += data.get("numStartups", 0)
     if total_startups:
         merged["numStartups"] = total_startups
@@ -283,28 +391,30 @@ def load_history():
         sources.append(_as["history_jsonl"])
     sources.append(HISTORY_JSONL)
     for path in sources:
-        if not path or not path.exists():
+        if not path:
             continue
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+        content = read_text(path)
+        if content is None:
+            continue
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                # Deduplicate by sessionId + timestamp
+                dedup_key = (obj.get("sessionId", ""), obj.get("timestamp", 0))
+                if dedup_key in seen_ids:
                     continue
-                try:
-                    obj = json.loads(line)
-                    # Deduplicate by sessionId + timestamp
-                    dedup_key = (obj.get("sessionId", ""), obj.get("timestamp", 0))
-                    if dedup_key in seen_ids:
-                        continue
-                    seen_ids.add(dedup_key)
-                    prompts.append({
-                        "display": obj.get("display", ""),
-                        "timestamp": obj.get("timestamp", 0),
-                        "project": obj.get("project", ""),
-                        "sessionId": obj.get("sessionId", ""),
-                    })
-                except json.JSONDecodeError:
-                    continue
+                seen_ids.add(dedup_key)
+                prompts.append({
+                    "display": obj.get("display", ""),
+                    "timestamp": obj.get("timestamp", 0),
+                    "project": obj.get("project", ""),
+                    "sessionId": obj.get("sessionId", ""),
+                })
+            except json.JSONDecodeError:
+                continue
     prompts.sort(key=lambda p: p["timestamp"])
     return prompts
 
@@ -469,17 +579,26 @@ def load_file_history_stats():
         fh_dir = claude_dir / "file-history"
         if not fh_dir.exists():
             continue
-        for sess_dir in fh_dir.iterdir():
-            if not sess_dir.is_dir():
-                continue
-            if sess_dir.name in seen_sessions:
-                continue
-            seen_sessions.add(sess_dir.name)
-            sessions += 1
-            for f in sess_dir.iterdir():
-                if f.is_file():
-                    total_files += 1
-                    total_size += f.stat().st_size
+        try:
+            for sess_dir in fh_dir.iterdir():
+                if not sess_dir.is_dir():
+                    continue
+                if sess_dir.name in seen_sessions:
+                    continue
+                seen_sessions.add(sess_dir.name)
+                sessions += 1
+                try:
+                    for f in sess_dir.iterdir():
+                        if f.is_file():
+                            try:
+                                total_size += f.stat().st_size
+                                total_files += 1
+                            except PermissionError:
+                                pass
+                except PermissionError:
+                    pass
+        except PermissionError:
+            pass
     return {
         "total_files": total_files,
         "total_sessions": sessions,
@@ -535,11 +654,11 @@ def calc_storage():
         src_size = 0
         if _as["claude_dir"].exists():
             for f in _as["claude_dir"].rglob("*"):
-                if f.is_file():
-                    try:
+                try:
+                    if f.is_file():
                         src_size += f.stat().st_size
-                    except OSError:
-                        pass
+                except OSError:
+                    pass
         if _as["dot_claude_json"] and _as["dot_claude_json"].exists():
             try:
                 src_size += _as["dot_claude_json"].stat().st_size
@@ -757,30 +876,40 @@ def parse_session_transcripts():
     total_files = 0
     total_lines = 0
 
-    sources = []
+    sources = []  # (label, projects_dir, sudo_user_or_None)
     if MIGRATION_ENABLED and MIGRATION_PROJECTS_DIR and MIGRATION_PROJECTS_DIR.exists():
-        sources.append(("migration", MIGRATION_PROJECTS_DIR))
+        sources.append((MIGRATION_LABEL, MIGRATION_PROJECTS_DIR, None))
     for _as in ADDITIONAL_SOURCES:
-        if _as["projects_dir"].exists():
-            sources.append((_as["label"], _as["projects_dir"]))
+        _su = _as.get("sudo_user")
+        if _su:
+            if sudo_path_exists(_as["projects_dir"], _su):
+                sources.append((_as["label"], _as["projects_dir"], _su))
+        elif _as["projects_dir"].exists():
+            sources.append((_as["label"], _as["projects_dir"], None))
     if PROJECTS_DIR.exists():
-        sources.append(("current", PROJECTS_DIR))
+        sources.append((SOURCE_LABEL, PROJECTS_DIR, None))
 
     if not sources:
         print(f"  WARNING: No projects directories found")
         return sessions
 
-    for source_label, projects_dir in sources:
-        print(f"  Source: {source_label} ({projects_dir})")
-        project_dirs = sorted(projects_dir.iterdir())
+    for source_label, projects_dir, sudo_user in sources:
+        print(f"  Source: {source_label} ({projects_dir}){' [sudo:'+sudo_user+']' if sudo_user else ''}")
+        if sudo_user:
+            project_dirs = sorted(sudo_list_dir(projects_dir, sudo_user))
+        else:
+            project_dirs = sorted(projects_dir.iterdir())
         total_dirs = len(project_dirs)
 
         for idx, project_dir in enumerate(project_dirs):
-            if not project_dir.is_dir():
+            if not sudo_user and not project_dir.is_dir():
                 continue
 
             project_name = project_dir.name
-            jsonl_files = sorted(project_dir.rglob("*.jsonl"))
+            if sudo_user:
+                jsonl_files = sorted(sudo_find_files(project_dir, "*.jsonl", sudo_user))
+            else:
+                jsonl_files = sorted(project_dir.rglob("*.jsonl"))
 
             if not jsonl_files:
                 continue
@@ -790,7 +919,10 @@ def parse_session_transcripts():
             for jsonl_file in jsonl_files:
                 total_files += 1
                 file_session_id = jsonl_file.stem
-                file_size = jsonl_file.stat().st_size
+                if sudo_user:
+                    file_size = sudo_file_size(jsonl_file, sudo_user)
+                else:
+                    file_size = jsonl_file.stat().st_size
 
                 # Detect subagent sessions
                 is_subagent = "/subagents/" in str(jsonl_file)
@@ -799,13 +931,20 @@ def parse_session_transcripts():
                     parent_id = jsonl_file.parent.parent.name
 
                 # Skip if this session was already fully parsed from migration
-                if file_session_id in sessions and source_label == "current":
+                if file_session_id in sessions and source_label == SOURCE_LABEL:
                     # Same session file in both sources — skip duplicate
                     continue
 
                 try:
-                    with open(jsonl_file, "r", encoding="utf-8", errors="replace") as f:
-                        for line in f:
+                    if sudo_user:
+                        _content = sudo_read_text(jsonl_file, sudo_user)
+                        if _content is None:
+                            continue
+                        _line_iter = _content.split("\n")
+                    else:
+                        _line_iter = open(jsonl_file, "r", encoding="utf-8", errors="replace").readlines()
+
+                    for line in _line_iter:
                             total_lines += 1
                             line = line.strip()
                             if not line:
@@ -1042,8 +1181,8 @@ def parse_session_transcripts():
             })
         del sessions[sub_id]
 
-    migration_count = sum(1 for s in sessions.values() if s.get("source") == "migration")
-    current_count = sum(1 for s in sessions.values() if s.get("source") == "current")
+    migration_count = sum(1 for s in sessions.values() if s.get("source") == MIGRATION_LABEL)
+    current_count = sum(1 for s in sessions.values() if s.get("source") == SOURCE_LABEL)
     print(f"  Parsed {total_files} files, {total_lines} lines, {len(sessions)} sessions"
           f" (migration: {migration_count}, current: {current_count})")
     return sessions
@@ -1054,33 +1193,53 @@ def extract_session_messages(session_id, project_dir_name):
     messages = []
 
     # Search for the JSONL file
-    sources = []
+    sources = []  # (projects_dir, sudo_user_or_None)
     if MIGRATION_ENABLED and MIGRATION_PROJECTS_DIR and MIGRATION_PROJECTS_DIR.exists():
-        sources.append(MIGRATION_PROJECTS_DIR)
+        sources.append((MIGRATION_PROJECTS_DIR, None))
     for _as in ADDITIONAL_SOURCES:
-        if _as["projects_dir"].exists():
-            sources.append(_as["projects_dir"])
+        _su = _as.get("sudo_user")
+        if _su:
+            sources.append((_as["projects_dir"], _su))
+        elif _as["projects_dir"].exists():
+            sources.append((_as["projects_dir"], None))
     if PROJECTS_DIR.exists():
-        sources.append(PROJECTS_DIR)
+        sources.append((PROJECTS_DIR, None))
 
     jsonl_path = None
-    for projects_dir in sources:
+    found_sudo_user = None
+    for projects_dir, su in sources:
         candidate = projects_dir / project_dir_name / f"{session_id}.jsonl"
-        if candidate.exists():
-            jsonl_path = candidate
-            break
-        # Also search subdirectories
-        for f in (projects_dir / project_dir_name).rglob(f"{session_id}.jsonl"):
-            jsonl_path = f
-            break
-        if jsonl_path:
-            break
+        if su:
+            if sudo_path_exists(candidate, su):
+                jsonl_path = candidate
+                found_sudo_user = su
+                break
+            # Also search subdirectories
+            found = sudo_find_files(projects_dir / project_dir_name, f"{session_id}.jsonl", su)
+            if found:
+                jsonl_path = found[0]
+                found_sudo_user = su
+                break
+        else:
+            if candidate.exists():
+                jsonl_path = candidate
+                break
+            # Also search subdirectories
+            for f in (projects_dir / project_dir_name).rglob(f"{session_id}.jsonl"):
+                jsonl_path = f
+                break
+            if jsonl_path:
+                break
 
     if not jsonl_path:
         return messages
 
-    with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-        raw_lines = f.readlines()
+    if found_sudo_user:
+        _content = sudo_read_text(jsonl_path, found_sudo_user)
+        raw_lines = _content.split("\n") if _content else []
+    else:
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+            raw_lines = f.readlines()
 
     # Pre-pass: collect tool results keyed by tool_use_id
     tool_results_by_id = {}
@@ -1400,7 +1559,7 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
         "sessions": 0, "messages": 0, "cost": 0.0,
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_tokens": 0, "cache_write_tokens": 0,
-        "file_size": 0
+        "file_size": 0, "sources": set()
     })
     model_totals = defaultdict(lambda: {
         "input_tokens": 0, "output_tokens": 0,
@@ -1485,6 +1644,7 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
         ps["cache_read_tokens"] += session_cache_read
         ps["cache_write_tokens"] += session_cache_write
         ps["file_size"] += sess["file_size"]
+        ps["sources"].add(sess.get("source", SOURCE_LABEL))
 
         daily_messages[date_str] += sess["message_count"]
         daily_sessions[date_str] += 1
@@ -1531,6 +1691,7 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
             "errors": [{"message": e["message"], "tool": e.get("tool", "unknown"), "category": e.get("category", "other"), "timestamp": e.get("timestamp", "")} for e in sess.get("errors", [])],
             "file_ops_count": len(sess.get("file_ops", [])),
             "git_ops": sess.get("git_ops", []),
+            "source": sess.get("source", SOURCE_LABEL),
         })
 
     # ── Enrich from history: add sessions missing from transcripts ─────────
@@ -1653,6 +1814,7 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
             "cache_read_tokens": pdata["cache_read_tokens"],
             "cache_write_tokens": pdata["cache_write_tokens"],
             "file_size_mb": round(pdata["file_size"] / 1_048_576, 1),
+            "sources": sorted(pdata["sources"]),
         })
 
     model_summary = []
@@ -1959,6 +2121,9 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .session-filters { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
 .session-filters select, .session-filters input { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:8px; font-size:13px; }
 .session-filters select { min-width:200px; }
+.bulk-download-btn { padding: 6px 14px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); background: var(--bg2); color: var(--text2); cursor: pointer; border-radius: 6px; transition: all 0.15s; display: inline-flex; align-items: center; gap: 4px; }
+.bulk-download-btn:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
+.bulk-download-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .session-card { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:12px; cursor:pointer; transition:border-color .2s; }
 .session-card:hover { border-color:var(--accent); }
 .session-card .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
@@ -1975,6 +2140,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .model-badge.opus { background:rgba(168,85,247,0.2); color:var(--purple); }
 .model-badge.sonnet { background:rgba(59,130,246,0.2); color:var(--blue); }
 .model-badge.haiku { background:rgba(34,197,94,0.2); color:var(--green); }
+.source-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; letter-spacing:0.3px; margin-left:6px; vertical-align:middle; }
 
 .pagination { display:flex; gap:8px; justify-content:center; margin-top:16px; align-items:center; }
 .pagination button { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:6px; cursor:pointer; }
@@ -2017,6 +2183,10 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .misc-stat { padding:16px; background:var(--bg3); border-radius:8px; text-align:center; }
 .misc-stat .ms-val { font-size:24px; font-weight:700; color:var(--accent2); }
 .misc-stat .ms-label { font-size:12px; color:var(--text2); margin-top:4px; }
+.sidebar-row { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; }
+.sidebar-row .label { color:var(--text2); }
+.sidebar-row .label::after { content:':'; margin-right:0.5em; }
+.sidebar-row .val { font-weight:600; font-variant-numeric:tabular-nums; }
 .plugin-status { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; }
 .plugin-status.active { background:rgba(34,197,94,0.2); color:var(--green); }
 .plugin-status.inactive { background:rgba(239,68,68,0.2); color:var(--red); }
@@ -2069,6 +2239,16 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
   .chart-box canvas { max-height:280px; }
 }
 </style>
+<script>
+// URL-loop guard: if a server catch-all served this page at a path with
+// repeated /sessions/ segments, our relative "Chat" links would feed the
+// loop on every click. Redirect to root before anything else runs.
+(function() {
+  if (location.pathname.split('/sessions/').length > 2) {
+    location.replace(location.origin + '/');
+  }
+})();
+</script>
 </head>
 <body>
 
@@ -2158,6 +2338,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
       <table class="data-table sortable" id="projectTable">
         <thead><tr>
           <th data-sort="name">__L_projects_th_project__</th>
+          <th data-sort="sources">Source</th>
           <th data-sort="sessions" class="num">__L_projects_th_sessions__</th>
           <th data-sort="messages" class="num">__L_projects_th_messages__</th>
           <th data-sort="cost" class="num">__L_projects_th_api_value__</th>
@@ -2172,6 +2353,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
   <div class="tab-content" id="tab-sessions">
     <div class="session-filters">
       <select id="filterProject"><option value="">__L_sessions_tab_all_projects__</option></select>
+      <select id="filterSource"><option value="">All Sources</option></select>
       <select id="filterSort">
         <option value="date-desc">__L_sessions_tab_sort_date_desc__</option>
         <option value="date-asc">__L_sessions_tab_sort_date_asc__</option>
@@ -2181,6 +2363,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
       </select>
       <input type="text" id="filterSearch" placeholder="__L_sessions_tab_search_placeholder__">
       <span class="meta" id="sessionCount"></span>
+      <button id="bulkDownloadBtn" class="bulk-download-btn" style="margin-left:auto" title="Download all currently filtered sessions as a ZIP of Markdown files">&#11015; Download all (0)</button>
     </div>
     <div id="sessionList"></div>
     <div class="pagination" id="sessionPagination"></div>
@@ -2261,7 +2444,6 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
       <div class="chart-box"><h3>__L_insights_git_ops__</h3><div id="gitOpsInfo"></div></div>
     </div>
     <div class="chart-grid">
-      <div class="chart-box"><h3>__L_insights_memory_per_session__</h3><canvas id="memoryChart" height="200"></canvas></div>
       <div class="chart-box"><h3>__L_insights_error_rate_over_time__</h3><canvas id="errorRateChart" height="200"></canvas></div>
     </div>
   </div>
@@ -2303,10 +2485,36 @@ function escHtml(s) {
 }
 
 const MODEL_COLORS = {
-  'Opus 4.6': '#a855f7', 'Opus 4.5': '#7c3aed',
+  'Opus 4.7': '#c084fc', 'Opus 4.6': '#a855f7', 'Opus 4.5': '#7c3aed',
   'Sonnet 4.5': '#3b82f6', 'Haiku 4.5': '#22c55e',
   'Unknown': '#6b7280'
 };
+
+const SOURCE_COLORS = [
+  {bg:'rgba(245,158,11,0.15)', fg:'#f59e0b'},
+  {bg:'rgba(6,182,212,0.15)', fg:'#06b6d4'},
+  {bg:'rgba(168,85,247,0.15)', fg:'#a855f7'},
+  {bg:'rgba(34,197,94,0.15)', fg:'#22c55e'},
+  {bg:'rgba(239,68,68,0.15)', fg:'#ef4444'},
+  {bg:'rgba(59,130,246,0.15)', fg:'#3b82f6'},
+  {bg:'rgba(236,72,153,0.15)', fg:'#ec4899'},
+];
+const _sourceColorMap = {};
+function sourceColor(label) {
+  if (!_sourceColorMap[label]) {
+    let h = 0; for (let i = 0; i < label.length; i++) h = ((h << 5) - h + label.charCodeAt(i)) | 0;
+    _sourceColorMap[label] = SOURCE_COLORS[Math.abs(h) % SOURCE_COLORS.length];
+  }
+  return _sourceColorMap[label];
+}
+function makeSourceBadge(label) {
+  const c = sourceColor(label);
+  const span = document.createElement('span');
+  span.className = 'source-badge';
+  span.style.background = c.bg; span.style.color = c.fg;
+  span.textContent = label;
+  return span;
+}
 
 Chart.defaults.color = '#94a3b8';
 Chart.defaults.borderColor = '#1e293b';
@@ -2421,15 +2629,16 @@ function filterData(days, projectFilter) {
   // Recalculate projects from filtered sessions
   const projMap = {};
   F.sessions.forEach(s => {
-    if (!projMap[s.project]) projMap[s.project] = {name: s.project, sessions:0, messages:0, cost:0, output_tokens:0, file_size_mb: 0};
+    if (!projMap[s.project]) projMap[s.project] = {name: s.project, sessions:0, messages:0, cost:0, output_tokens:0, file_size_mb: 0, sources: new Set()};
     const p = projMap[s.project];
     p.sessions++;
     p.messages += s.messages || 0;
     p.cost += s.cost || 0;
     p.output_tokens += s.output_tokens || 0;
     p.file_size_mb = Math.max(p.file_size_mb, s.file_size_mb || 0);
+    if (s.source) p.sources.add(s.source);
   });
-  F.projects = Object.values(projMap).sort((a, b) => b.cost - a.cost);
+  F.projects = Object.values(projMap).map(p => { p.sources = [...p.sources].sort(); return p; }).sort((a, b) => b.cost - a.cost);
 
   // Recalculate hourly_distribution
   const hourly = Array.from({length:24}, (_, i) => ({hour: i, messages: 0}));
@@ -2877,8 +3086,13 @@ function renderProjectTable(sortKey, sortDir) {
     const slug = D.project_slugs && D.project_slugs[p.name];
     const dispPName = anonMode ? anonName(p.name) : p.name;
     const nameCell = (!anonMode && slug) ? '<a href="projects/'+slug+'.html">'+escHtml(dispPName)+'</a>' : escHtml(dispPName);
+    const sourceCell = (p.sources || []).map(function(src) {
+      const c = sourceColor(src);
+      return '<span class="source-badge" style="background:'+c.bg+';color:'+c.fg+'">'+escHtml(src)+'</span>';
+    }).join(' ');
     const cells = [
       {html: nameCell, cls: ''},
+      {html: sourceCell, cls: ''},
       {val: p.sessions, cls: 'num'},
       {val: fmt(p.messages), cls: 'num'},
       {val: fmtUSD(p.cost), cls: 'num'},
@@ -2899,13 +3113,96 @@ function renderProjectTable(sortKey, sortDir) {
 let sessionPage = 0;
 const SESSION_PER_PAGE = 20;
 
+// ─── Markdown export helpers ───────────────────────────────────────────
+function sanitizeProjectSlug(p) {
+  const s = (p || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return s || 'unknown';
+}
+function mdFilename(session) {
+  const date = session.date || (session.start ? String(session.start).slice(0,10) : '0000-00-00');
+  const slug = sanitizeProjectSlug(session.project);
+  const id8 = (session.session_id || '').slice(0, 8);
+  return date + '-' + slug + '-' + id8 + '.md';
+}
+function yamlEscape(v) {
+  if (v == null) return '';
+  const str = String(v);
+  if (/[:#"\\n]/.test(str)) return '"' + str.replace(/"/g, '\\\\"') + '"';
+  return str;
+}
+function buildMarkdown(session, messages) {
+  const lines = [];
+  lines.push('---');
+  lines.push('session_id: ' + yamlEscape(session.session_id));
+  lines.push('project: ' + yamlEscape(session.project));
+  lines.push('date: ' + yamlEscape(session.date));
+  let startIso = '';
+  if (session.start) {
+    try { startIso = new Date(session.start).toISOString().replace(/\\.\\d{3}Z$/, 'Z'); } catch(e) { startIso = String(session.start); }
+  }
+  lines.push('start: ' + yamlEscape(startIso));
+  lines.push('duration_min: ' + (session.duration_min != null ? session.duration_min : 0));
+  lines.push('model: ' + yamlEscape(session.primary_model));
+  lines.push('messages: ' + (session.messages != null ? session.messages : 0));
+  lines.push('cost_usd: ' + (typeof session.cost === 'number' ? session.cost.toFixed(4) : '0.0000'));
+  if (session.source) lines.push('source: ' + yamlEscape(session.source));
+  lines.push('---');
+  lines.push('');
+
+  let title = ((session.first_prompt || '').split('\\n')[0] || '').trim();
+  if (title.length > 80) title = title.slice(0, 80) + '\\u2026';
+  if (!title) title = 'Session ' + ((session.session_id || '').slice(0, 8));
+  lines.push('# ' + title);
+  lines.push('');
+
+  messages.forEach(m => {
+    if (m.role !== 'user' && m.role !== 'assistant') return;
+    if (!(m.content || '').trim()) return;
+    let ts = '';
+    if (m.timestamp) {
+      try { ts = new Date(m.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}); } catch(e) {}
+    }
+    if (m.role === 'user') {
+      lines.push('## User' + (ts ? ' \\u2014 ' + ts : ''));
+    } else {
+      const model = m.model ? ' (' + m.model + ')' : '';
+      lines.push('## Assistant' + model + (ts ? ' \\u2014 ' + ts : ''));
+    }
+    lines.push('');
+    lines.push(m.content || '');
+    lines.push('');
+  });
+  return lines.join('\\n');
+}
+function triggerDownload(filename, content, mimeType) {
+  const blob = content instanceof Blob ? content : new Blob([content], {type: mimeType || 'text/markdown;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+}
+function loadJSZip() {
+  if (window.JSZip) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load JSZip'));
+    document.head.appendChild(s);
+  });
+}
+
 function getFilteredSessions() {
   let list = [...F.sessions];
   const proj = document.getElementById('filterProject').value;
+  const src = document.getElementById('filterSource').value;
   const search = document.getElementById('filterSearch').value.toLowerCase();
   const sort = document.getElementById('filterSort').value;
 
   if (proj) list = list.filter(s => s.project === proj);
+  if (src) list = list.filter(s => s.source === src);
   if (search) list = list.filter(s =>
     (s.first_prompt || '').toLowerCase().includes(search) ||
     s.project.toLowerCase().includes(search));
@@ -2933,6 +3230,19 @@ function renderSessions() {
   });
   // Restore selection if still valid
   if (projects.includes(currentVal)) sel.value = currentVal;
+
+  // Source filter
+  const srcSel = document.getElementById('filterSource');
+  const currentSrc = srcSel.value;
+  while (srcSel.options.length > 1) srcSel.remove(1);
+  const sources = [...new Set(F.sessions.map(s => s.source).filter(Boolean))].sort();
+  sources.forEach(src => {
+    const o = document.createElement('option');
+    o.value = src; o.textContent = src;
+    srcSel.appendChild(o);
+  });
+  if (sources.includes(currentSrc)) srcSel.value = currentSrc;
+
   sessionPage = 0;
   renderSessionList();
 }
@@ -2950,14 +3260,15 @@ function buildSessionCard(s) {
   const projSpan = document.createElement('span'); projSpan.className = 'project'; projSpan.textContent = anonMode ? anonName(s.project) : s.project;
   const costSpan = document.createElement('span'); costSpan.className = 'cost'; costSpan.textContent = fmtUSD(s.cost);
   const rightGroup = document.createElement('span'); rightGroup.style.display = 'flex'; rightGroup.style.alignItems = 'center';
-  if (!anonMode) {
+  if (!anonMode && s.has_chat !== false) {
     const chatLink = document.createElement('a'); chatLink.href = 'sessions/' + s.session_id + '.html';
     chatLink.textContent = 'Chat'; chatLink.addEventListener('click', function(e) { e.stopPropagation(); });
     chatLink.style.cssText = 'color:var(--accent2);font-size:12px;padding:4px 10px;border:1px solid var(--accent);border-radius:6px;margin-right:8px;text-decoration:none';
     rightGroup.appendChild(chatLink);
   }
   rightGroup.appendChild(costSpan);
-  top.appendChild(projSpan); top.appendChild(rightGroup);
+  top.appendChild(projSpan);
+  top.appendChild(rightGroup);
   card.appendChild(top);
 
   // Info row
@@ -2971,6 +3282,7 @@ function buildSessionCard(s) {
   infoParts.forEach(t => { const sp = document.createElement('span'); sp.textContent = t; info.appendChild(sp); });
   const badge = document.createElement('span'); badge.className = 'model-badge ' + modelClass; badge.textContent = s.primary_model;
   info.appendChild(badge);
+  if (s.source) info.appendChild(makeSourceBadge(s.source));
   if (s.compactions > 0) {
     const compSpan = document.createElement('span'); compSpan.style.color = 'var(--amber)';
     compSpan.innerHTML = '&#9889; ' + s.compactions;
@@ -3022,6 +3334,81 @@ function buildSessionCard(s) {
   return card;
 }
 
+function updateBulkBtnLabel() {
+  const btn = document.getElementById('bulkDownloadBtn');
+  if (!btn) return;
+  const n = getFilteredSessions().length;
+  if (!btn.dataset.busy) {
+    btn.textContent = '\\u2B07 Download all (' + n + ')';
+    btn.disabled = (n === 0);
+  }
+}
+async function bulkDownloadSessions() {
+  const btn = document.getElementById('bulkDownloadBtn');
+  const sessions = getFilteredSessions().filter(s => s.has_chat !== false);
+  if (sessions.length === 0) return;
+  if (sessions.length > 100 && !confirm(sessions.length + ' Sessions als ZIP herunterladen? Das kann einen Moment dauern.')) return;
+
+  btn.dataset.busy = '1';
+  btn.disabled = true;
+
+  let errors = 0;
+  try {
+    try { await loadJSZip(); }
+    catch (e) {
+      alert('ZIP-Bibliothek konnte nicht geladen werden (offline?).');
+      return;
+    }
+
+    const zip = new JSZip();
+    const usedNames = new Set();
+
+    for (let i = 0; i < sessions.length; i++) {
+      btn.textContent = 'Loading ' + (i + 1) + '/' + sessions.length + '\\u2026';
+      try {
+        const resp = await fetch('sessions/' + sessions[i].session_id + '.html');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const text = await resp.text();
+        const startMarker = '\\nconst S = ';
+        const endMarker = '};\\nconst FLOW';
+        const startIdx = text.indexOf(startMarker);
+        if (startIdx === -1) throw new Error('Session JSON not found in HTML');
+        const jsonStart = startIdx + startMarker.length;
+        const endIdx = text.indexOf(endMarker, jsonStart);
+        if (endIdx === -1) throw new Error('Session JSON end marker not found');
+        const data = JSON.parse(text.slice(jsonStart, endIdx + 1));
+        const md = buildMarkdown(data.session, data.messages);
+        let name = mdFilename(data.session);
+        if (usedNames.has(name)) {
+          let n = 2;
+          let candidate;
+          do { candidate = name.replace(/\\.md$/, '-' + n + '.md'); n++; } while (usedNames.has(candidate));
+          name = candidate;
+        }
+        usedNames.add(name);
+        zip.file(name, md);
+      } catch (e) {
+        errors++;
+        console.warn('Session ' + sessions[i].session_id + ' failed:', e);
+      }
+    }
+
+    if (usedNames.size > 0) {
+      btn.textContent = 'Zipping\\u2026';
+      const blob = await zip.generateAsync({type: 'blob'});
+      const today = new Date().toISOString().slice(0, 10);
+      triggerDownload('claude-sessions-' + today + '.zip', blob, 'application/zip');
+    }
+  } finally {
+    delete btn.dataset.busy;
+    updateBulkBtnLabel();
+  }
+
+  if (errors > 0) {
+    alert(errors + ' sessions konnten nicht geladen werden \\u2014 siehe Konsole.');
+  }
+}
+
 function renderSessionList() {
   const filtered = getFilteredSessions();
   const total = filtered.length;
@@ -3059,6 +3446,7 @@ function renderSessionList() {
       pagDiv.appendChild(next); pagDiv.appendChild(last);
     }
   }
+  updateBulkBtnLabel();
 }
 
 // ── Tab 5: Plan & Billing ──────────────────────────────────────────────
@@ -3416,22 +3804,6 @@ function renderInsights() {
       '<div class="sidebar-row"><span class="label">__L_insights_pull_requests__</span><span class="val" style="color:var(--purple)">'+(gs.prs||0)+'</span></div>';
   }
 
-  // Memory per session chart
-  const telSessions = D.insights?.telemetry?.per_session || {};
-  const memData = D.sessions.filter(s => telSessions[s.session_id]).map(s => ({
-    date: s.date, rss: telSessions[s.session_id].peak_rss_mb
-  }));
-  if (memData.length > 0) {
-    new Chart(document.getElementById('memoryChart'), {
-      type: 'bar',
-      data: {
-        labels: memData.map(d => d.date),
-        datasets: [{ label: 'Peak RSS (MB)', data: memData.map(d => d.rss), backgroundColor: 'rgba(168,85,247,0.6)', borderRadius:3 }]
-      },
-      options: { responsive:true, plugins:{legend:{labels:{color:'#e2e8f0'}}}, scales:{ x:{ticks:{color:'#94a3b8',maxTicksLimit:15}}, y:{ticks:{color:'#94a3b8'}} } }
-    });
-  }
-
   // Error rate over time chart
   const dailyErrors = {};
   D.sessions.forEach(s => {
@@ -3584,6 +3956,7 @@ document.querySelectorAll('.sortable th[data-sort]').forEach(th => {
 
 // ── Filter events ──────────────────────────────────────────────────────
 document.getElementById('filterProject').addEventListener('change', () => { sessionPage = 0; renderSessionList(); });
+document.getElementById('filterSource').addEventListener('change', () => { sessionPage = 0; renderSessionList(); });
 document.getElementById('filterSort').addEventListener('change', () => { sessionPage = 0; renderSessionList(); });
 document.getElementById('filterSearch').addEventListener('input', () => { sessionPage = 0; renderSessionList(); });
 document.getElementById('hideEmptySessions').addEventListener('change', () => { applyFilter(currentDays); });
@@ -3602,6 +3975,7 @@ renderCosts();
 renderActivity();
 renderProjects();
 renderSessions();
+document.getElementById('bulkDownloadBtn').addEventListener('click', bulkDownloadSessions);
 renderPlan();
 renderInsights();
 renderAgentsTab();
@@ -3825,7 +4199,9 @@ def generate_session_pages(sessions, session_list, history=None):
                 })
 
         if not messages:
+            sess_data["has_chat"] = False
             continue
+        sess_data["has_chat"] = True
 
         flow_data = build_session_flow(messages)
 
@@ -3957,6 +4333,7 @@ a:hover { text-decoration:underline; }
 .sidebar-card h4 { font-size:13px; font-weight:600; margin-bottom:10px; color:var(--text2); text-transform:uppercase; letter-spacing:0.5px; }
 .sidebar-row { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; }
 .sidebar-row .label { color:var(--text2); }
+.sidebar-row .label::after { content:':'; margin-right:0.5em; }
 .sidebar-row .val { font-weight:600; font-variant-numeric:tabular-nums; }
 .sidebar-tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; margin:2px; background:var(--bg3); }
 .compaction-timeline { margin-top:8px; }
@@ -4001,6 +4378,7 @@ a:hover { text-decoration:underline; }
           <button class="filter-btn" data-filter="agent-dispatch">Subagents</button>
         </div>
         <button class="copy-btn" id="copyBtn">&#128203; Copy</button>
+        <button class="copy-btn" id="downloadBtn" style="margin-left:6px" title="Download filtered messages as Markdown">&#11015; Download</button>
       </div>
       <div class="chat-messages" id="chatPanel"></div>
     </div>
@@ -4384,6 +4762,77 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
   });
 });
 
+// ─── Markdown export helpers ───────────────────────────────────────────
+function sanitizeProjectSlug(p) {
+  const s = (p || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return s || 'unknown';
+}
+function mdFilename(session) {
+  const date = session.date || (session.start ? String(session.start).slice(0,10) : '0000-00-00');
+  const slug = sanitizeProjectSlug(session.project);
+  const id8 = (session.session_id || '').slice(0, 8);
+  return date + '-' + slug + '-' + id8 + '.md';
+}
+function yamlEscape(v) {
+  if (v == null) return '';
+  const str = String(v);
+  if (/[:#"\\n]/.test(str)) return '"' + str.replace(/"/g, '\\\\"') + '"';
+  return str;
+}
+function buildMarkdown(session, messages) {
+  const lines = [];
+  lines.push('---');
+  lines.push('session_id: ' + yamlEscape(session.session_id));
+  lines.push('project: ' + yamlEscape(session.project));
+  lines.push('date: ' + yamlEscape(session.date));
+  let startIso = '';
+  if (session.start) {
+    try { startIso = new Date(session.start).toISOString().replace(/\\.\\d{3}Z$/, 'Z'); } catch(e) { startIso = String(session.start); }
+  }
+  lines.push('start: ' + yamlEscape(startIso));
+  lines.push('duration_min: ' + (session.duration_min != null ? session.duration_min : 0));
+  lines.push('model: ' + yamlEscape(session.primary_model));
+  lines.push('messages: ' + (session.messages != null ? session.messages : 0));
+  lines.push('cost_usd: ' + (typeof session.cost === 'number' ? session.cost.toFixed(4) : '0.0000'));
+  if (session.source) lines.push('source: ' + yamlEscape(session.source));
+  lines.push('---');
+  lines.push('');
+
+  let title = ((session.first_prompt || '').split('\\n')[0] || '').trim();
+  if (title.length > 80) title = title.slice(0, 80) + '\\u2026';
+  if (!title) title = 'Session ' + ((session.session_id || '').slice(0, 8));
+  lines.push('# ' + title);
+  lines.push('');
+
+  messages.forEach(m => {
+    if (m.role !== 'user' && m.role !== 'assistant') return;
+    if (!(m.content || '').trim()) return;
+    let ts = '';
+    if (m.timestamp) {
+      try { ts = new Date(m.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}); } catch(e) {}
+    }
+    if (m.role === 'user') {
+      lines.push('## User' + (ts ? ' \\u2014 ' + ts : ''));
+    } else {
+      const model = m.model ? ' (' + m.model + ')' : '';
+      lines.push('## Assistant' + model + (ts ? ' \\u2014 ' + ts : ''));
+    }
+    lines.push('');
+    lines.push(m.content || '');
+    lines.push('');
+  });
+  return lines.join('\\n');
+}
+function triggerDownload(filename, content, mimeType) {
+  const blob = content instanceof Blob ? content : new Blob([content], {type: mimeType || 'text/markdown;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+}
+
 // Copy to clipboard
 document.getElementById('copyBtn').addEventListener('click', function() {
   const btn = this;
@@ -4405,6 +4854,23 @@ document.getElementById('copyBtn').addEventListener('click', function() {
     btn.classList.add('copied');
     setTimeout(() => { btn.innerHTML = '&#128203; Copy'; btn.classList.remove('copied'); }, 2000);
   });
+});
+
+// Download filtered chat as Markdown
+document.getElementById('downloadBtn').addEventListener('click', function() {
+  const btn = this;
+  const visible = [];
+  document.querySelectorAll('#chatPanel > .msg').forEach(el => {
+    if (el.style.display === 'none') return;
+    const m = el.id.match(/^msg-(\\d+)$/);
+    if (m) visible.push(parseInt(m[1], 10));
+  });
+  const filtered = visible.map(i => msgs[i]).filter(m => m && (m.role === 'user' || m.role === 'assistant'));
+  const md = buildMarkdown(sess, filtered);
+  triggerDownload(mdFilename(sess), md);
+  btn.innerHTML = '&#10003; Downloaded!';
+  btn.classList.add('copied');
+  setTimeout(() => { btn.innerHTML = '&#11015; Download'; btn.classList.remove('copied'); }, 2000);
 });
 
 // Sidebar
@@ -5699,7 +6165,7 @@ if (FLOW && FLOW.agents && FLOW.agents.length > 0 && FLOW.events && FLOW.events.
 document.querySelectorAll(".msg,.marker").forEach(function(el) {
   el.addEventListener("click", function() {
     if (!window._sessionFlow) return;
-    var match = (el.id || "").match(/(?:msg|marker)-(\d+)/);
+    var match = (el.id || "").match(/(?:msg|marker)-(\\d+)/);
     var idx = match ? parseInt(match[1]) : NaN;
     if (isNaN(idx)) return;
     var sf = window._sessionFlow;
@@ -6185,6 +6651,13 @@ def main():
         file_history=file_history, storage=storage,
         telemetry=telemetry, tasks=tasks, memories=memories,
     )
+
+    print(f"\nGenerating session pages...")
+    generate_session_pages(sessions, data["sessions"])
+
+    print(f"\nGenerating project pages...")
+    project_slugs = generate_project_pages(data["sessions"], data=data)
+    data["project_slugs"] = project_slugs
 
     print(f"\nWriting {DASHBOARD_DATA}...")
     with open(DASHBOARD_DATA, "w", encoding="utf-8") as f:
