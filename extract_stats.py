@@ -6886,7 +6886,7 @@ def main():
     )
 
     print(f"\nGenerating session pages...")
-    generate_session_pages(sessions, data["sessions"])
+    generate_session_pages(sessions, data["sessions"], history=history)
 
     print(f"\nGenerating project pages...")
     project_slugs = generate_project_pages(data["sessions"], data=data)
@@ -6901,12 +6901,6 @@ def main():
     generate_dashboard(data)
     print(f"  Size: {DASHBOARD_HTML.stat().st_size / 1024:.1f} KB")
 
-    print(f"\nGenerating session pages...")
-    generate_session_pages(sessions, data["sessions"], history=history)
-
-    print(f"\nGenerating project pages...")
-    project_slugs = generate_project_pages(data["sessions"], data=data)
-    data["project_slugs"] = project_slugs
     # Re-generate dashboard with project slug mapping
     generate_dashboard(data)
 
