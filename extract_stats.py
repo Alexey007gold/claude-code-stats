@@ -4475,6 +4475,7 @@ def _get_session_html_template():
 <link rel="icon" type="image/png" href="../favicon.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
 :root { --bg:#0f1117; --bg2:#1a1d27; --bg3:#242836; --border:#2d3348; --text:#e2e8f0; --text2:#94a3b8; --accent:#6366f1; --accent2:#818cf8; --green:#22c55e; --orange:#f59e0b; --red:#ef4444; --blue:#3b82f6; --purple:#a855f7; --cyan:#06b6d4; --amber:#f59e0b; }
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -5124,6 +5125,7 @@ sideHtml += '<div class="sidebar-card"><h4>Token Breakdown</h4>' +
   '<div class="sidebar-row"><span class="label">Cache Read</span><span class="val">'+fmtTokens(sess.cache_read_tokens)+'</span></div>' +
   '<div class="sidebar-row"><span class="label">Cache Write</span><span class="val">'+fmtTokens(sess.cache_write_tokens)+'</span></div>' +
   '</div>';
+sideHtml += '<div class="sidebar-card"><h4>Context Window</h4><div style="position:relative;height:160px"><canvas id="ctxChart"></canvas></div></div>';
 const tools = Object.entries(sess.tools||{}).sort((a,b)=>b[1]-a[1]);
 if (tools.length>0) {
   sideHtml += '<div class="sidebar-card"><h4>Tools Used</h4>' +
@@ -5159,6 +5161,44 @@ sideHtml += '<div class="sidebar-card"><h4>Metadata</h4>' +
   '<div class="sidebar-row"><span class="label">File Size</span><span class="val">'+sess.file_size_mb+' MB</span></div>' +
   '</div>';
 sideEl.innerHTML = sideHtml;
+
+// Context window chart
+(function() {
+  const ctxMsgs = msgs.filter(m => m.role === 'assistant' && m.tokens);
+  if (ctxMsgs.length < 2) return;
+  const labels = ctxMsgs.map((_, i) => i + 1);
+  const cacheReadData = ctxMsgs.map(m => m.tokens.cache_read || 0);
+  const inputData = ctxMsgs.map(m => m.tokens.input || 0);
+  const outputData = ctxMsgs.map(m => m.tokens.output || 0);
+  const gridColor = '#2d3348';
+  const tickColor = '#94a3b8';
+  const tickFont = { size: 9 };
+  const fmtK = v => v >= 1000 ? (v/1000).toFixed(0)+'K' : v;
+  new Chart(document.getElementById('ctxChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Cache Read', data: cacheReadData, borderColor: 'rgba(6,182,212,0.9)', backgroundColor: 'rgba(6,182,212,0.15)', fill: true, tension: 0.3, pointRadius: ctxMsgs.length > 40 ? 0 : 2, borderWidth: 1.5 },
+        { label: 'Input', data: inputData, borderColor: 'rgba(59,130,246,0.9)', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.3, pointRadius: ctxMsgs.length > 40 ? 0 : 2, borderWidth: 1.5 },
+        { label: 'Output', data: outputData, borderColor: 'rgba(168,85,247,0.9)', backgroundColor: 'rgba(168,85,247,0.08)', fill: true, tension: 0.3, pointRadius: ctxMsgs.length > 40 ? 0 : 2, borderWidth: 1.5 },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index' },
+      plugins: {
+        legend: { labels: { color: tickColor, font: { size: 10 }, boxWidth: 10, padding: 8 } },
+        tooltip: { callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y.toLocaleString() } }
+      },
+      scales: {
+        x: { ticks: { color: tickColor, font: tickFont, maxTicksLimit: 10 }, grid: { color: gridColor } },
+        y: { ticks: { color: tickColor, font: tickFont, callback: fmtK }, grid: { color: gridColor } }
+      }
+    }
+  });
+})();
 
 class SessionFlow {
   constructor(canvas, flowData, chatContainer) {
