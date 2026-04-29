@@ -5170,6 +5170,26 @@ if (allChangedFiles.length > 0) {
     }).join('') +
     '</div>';
 }
+const filesViewed = new Set();
+msgs.forEach(m => { (m.tools||[]).forEach(t => {
+  if (t.name==='Read' && t.input && t.input.file_path) filesViewed.add(t.input.file_path);
+  if (t.name==='Bash' && t.input && t.input.command) {
+    for (const match of t.input.command.matchAll(/\b(cat|head|tail|less|more|bat|wc)\s+(?:-\S+\s+)*([^\s;&|><'"]+)/g)) {
+      const p = match[2]; if (p && !p.startsWith('-') && !p.startsWith('$') && (p.includes('/') || p.includes('.'))) filesViewed.add(p);
+    }
+  }
+}); });
+const viewedFiles = [...filesViewed].sort();
+if (viewedFiles.length > 0) {
+  sideHtml += '<div class="sidebar-card"><h4>Files Viewed <span style="font-size:10px;font-weight:400;color:var(--text2)">('+viewedFiles.length+')</span></h4>' +
+    viewedFiles.map(f => {
+      const fname = f.split('/').pop();
+      return '<div class="sidebar-row" style="align-items:center" title="'+escHtml(f)+'">' +
+        '<span style="font-family:monospace;font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0">'+escHtml(fname)+'</span>' +
+        '</div>';
+    }).join('') +
+    '</div>';
+}
 const skills = Object.entries(sess.skills||{}).sort((a,b)=>b[1]-a[1]);
 if (skills.length>0) {
   sideHtml += '<div class="sidebar-card"><h4>Skills Used</h4>' +
