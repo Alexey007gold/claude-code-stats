@@ -2955,6 +2955,7 @@ function switchTab(name, btn) {
   btn.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
   try { localStorage.setItem('ccstats_activeTab', name); } catch(e) {}
+  try { history.replaceState(null, '', '#' + name); } catch(e) {}
 }
 
 // ── Tab 1: Costs ───────────────────────────────────────────────────────
@@ -3295,6 +3296,7 @@ function renderProjectTable(sortKey, sortDir) {
 
 // ── Tab 4: Sessions ────────────────────────────────────────────────────
 let sessionPage = 0;
+let sessionPageInitDone = false;
 let allProjectNames = [];
 const SESSION_PER_PAGE = 20;
 
@@ -3696,6 +3698,7 @@ function renderSessionList() {
     }
   }
   updateBulkBtnLabel();
+  if (sessionPageInitDone) try { localStorage.setItem('ccstats_sessionPage', sessionPage); } catch(e) {}
 }
 
 // ── Tab 5: Plan & Billing ──────────────────────────────────────────────
@@ -4261,7 +4264,8 @@ document.getElementById('projectFilter').addEventListener('input', function() {
 });
 initTabs();
 try {
-  const savedTab = localStorage.getItem('ccstats_activeTab');
+  const hashTab = location.hash.slice(1);
+  const savedTab = hashTab || localStorage.getItem('ccstats_activeTab');
   if (savedTab) {
     const btn = document.querySelector(`.tab-btn[data-tab="${savedTab}"]`);
     if (btn) switchTab(savedTab, btn);
@@ -4278,6 +4282,11 @@ try {
   if (savedSearch) document.getElementById('filterSearch').value = savedSearch;
 } catch(e) {}
 renderSessions();
+try {
+  const sp = parseInt(localStorage.getItem('ccstats_sessionPage') || '0', 10);
+  if (sp > 0) { sessionPage = sp; renderSessionList(); }
+} catch(e) {}
+sessionPageInitDone = true;
 document.getElementById('bulkDownloadBtn').addEventListener('click', bulkDownloadSessions);
 renderPlan();
 renderInsights();
