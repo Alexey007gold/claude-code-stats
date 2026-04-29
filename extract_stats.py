@@ -1131,6 +1131,18 @@ def parse_session_transcripts():
                                                     "timestamp": timestamp or "",
                                                 })
 
+                                        # Bash-based file ops (read/delete)
+                                        if tool_name == "Bash":
+                                            cmd = block.get("input", {}).get("command", "")
+                                            for m in re.finditer(r'\b(?:git\s+rm\s+(?:--\S+\s+)*|rm\s+(?:-\S+\s+)*)([^\s;&|><\'"]+)', cmd):
+                                                p = m.group(1)
+                                                if p and not p.startswith('-') and not p.startswith('$') and ('/' in p or '.' in p):
+                                                    sess["file_ops"].append({"op": "delete", "path": p, "timestamp": timestamp or ""})
+                                            for m in re.finditer(r'\b(?:cat|head|tail|less|more|bat|wc)\s+(?:-\S+\s+)*([^\s;&|><\'"]+)', cmd):
+                                                p = m.group(1)
+                                                if p and not p.startswith('-') and not p.startswith('$') and ('/' in p or '.' in p):
+                                                    sess["file_ops"].append({"op": "view", "path": p, "timestamp": timestamp or ""})
+
                                         # Git operations from Bash
                                         if tool_name == "Bash":
                                             cmd = block.get("input", {}).get("command", "")
@@ -1664,6 +1676,18 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
                 max_output = mdata["output_tokens"]
                 primary_model = get_model_display(model)
 
+        _fops = sess.get("file_ops", [])
+        _written  = {o["path"] for o in _fops if o["op"] == "write"}
+        _edited   = {o["path"] for o in _fops if o["op"] == "edit"}
+        _deleted  = {o["path"] for o in _fops if o["op"] == "delete"}
+        _viewed   = {o["path"] for o in _fops if o["op"] in ("read", "view")}
+        file_stats = {
+            "added":   len(_written - _deleted),
+            "edited":  len(_edited - _written - _deleted),
+            "deleted": len(_deleted),
+            "viewed":  len(_viewed),
+        }
+
         session_list.append({
             "session_id": sid,
             "project": proj_name,
@@ -1696,6 +1720,7 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
             "error_count": sess.get("error_count", 0),
             "errors": [{"message": e["message"], "tool": e.get("tool", "unknown"), "category": e.get("category", "other"), "timestamp": e.get("timestamp", "")} for e in sess.get("errors", [])],
             "file_ops_count": len(sess.get("file_ops", [])),
+            "file_stats": file_stats,
             "git_ops": sess.get("git_ops", []),
             "source": sess.get("source", SOURCE_LABEL),
         })
@@ -3500,6 +3525,18 @@ function buildSessionCard(s) {
   p2.textContent = 'Output: ' + fmtTokens(s.output_tokens) + ' | Input: ' + fmtTokens(s.input_tokens) + ' | Cache Read: ' + fmtTokens(s.cache_read_tokens);
   details.appendChild(p2);
 
+  const fs = s.file_stats || {};
+  const fsParts = [];
+  if (fs.added)   fsParts.push('<span style="color:var(--green)">+' + fs.added + ' added</span>');
+  if (fs.edited)  fsParts.push('<span style="color:var(--blue)">~' + fs.edited + ' edited</span>');
+  if (fs.deleted) fsParts.push('<span style="color:var(--red)">\u2212' + fs.deleted + ' deleted</span>');
+  if (fs.viewed)  fsParts.push('<span style="color:var(--text2)">' + fs.viewed + ' viewed</span>');
+  if (fsParts.length > 0) {
+    const pf = document.createElement('p'); pf.style.marginTop = '6px'; pf.style.fontSize = '12px';
+    pf.innerHTML = 'Files: ' + fsParts.join(' &nbsp;·&nbsp; ');
+    details.appendChild(pf);
+  }
+
   const toolEntries = Object.entries(s.tools || {}).sort((a,b) => b[1]-a[1]).slice(0, 10);
   if (toolEntries.length > 0) {
     const toolsDiv = document.createElement('div'); toolsDiv.className = 'tools'; toolsDiv.style.marginTop = '8px';
@@ -5143,11 +5180,19 @@ msgs.forEach(m => { (m.tools||[]).forEach(t => {
     }
   }
 }); });
-const allChangedFiles = [...new Set([...filesWritten,...filesEdited,...filesDeleted])].sort();
+function normP(p) { return p.replace(/^\\.\\//,''); }
+function isDeleted(f) { if (filesDeleted.has(f)) return true; for (const d of filesDeleted) { const nd=normP(d); if (f===nd||f.endsWith('/'+nd)) return true; } return false; }
+// Build unified set, preferring absolute paths over relative duplicates
+const _rawChanged = new Set([...filesWritten,...filesEdited,...filesDeleted]);
+const allChangedFiles = [..._rawChanged].filter(f => {
+  if (f.startsWith('/')||f.startsWith('~')) return true;
+  const rel = normP(f);
+  return ![..._rawChanged].some(g => g!==f && (g.endsWith('/'+rel)));
+}).sort();
 if (allChangedFiles.length > 0) {
-  const addedCount = [...filesWritten].filter(f => !filesDeleted.has(f)).length;
-  const editedCount = [...filesEdited].filter(f => !filesWritten.has(f) && !filesDeleted.has(f)).length;
-  const removedCount = filesDeleted.size;
+  const addedCount = allChangedFiles.filter(f => filesWritten.has(f) && !isDeleted(f)).length;
+  const editedCount = allChangedFiles.filter(f => filesEdited.has(f) && !filesWritten.has(f) && !isDeleted(f)).length;
+  const removedCount = allChangedFiles.filter(f => isDeleted(f)).length;
   const parts = [];
   if (addedCount) parts.push('<span style="color:var(--green)">+'+addedCount+'</span>');
   if (editedCount) parts.push('<span style="color:var(--blue)">~'+editedCount+'</span>');
@@ -5156,7 +5201,7 @@ if (allChangedFiles.length > 0) {
   sideHtml += '<div class="sidebar-card"><h4>Files Changed'+hdrSuffix+'</h4>' +
     allChangedFiles.map(f => {
       const fname = f.split('/').pop();
-      const isDel = filesDeleted.has(f);
+      const isDel = isDeleted(f);
       const isNew = filesWritten.has(f) && !isDel;
       const badge = isDel
         ? '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(239,68,68,0.15);color:var(--red);margin-left:4px;flex-shrink:0">del</span>'
@@ -6585,7 +6630,7 @@ def generate_project_pages(session_list, data=None):
                 memory_content = data["_memories"][proj_dir].get("content", "")
 
         # File ops aggregation
-        proj_file_ops = defaultdict(lambda: {"read": 0, "edit": 0, "write": 0})
+        proj_file_ops = defaultdict(lambda: {"read": 0, "edit": 0, "write": 0, "delete": 0, "view": 0})
         workflow_events = []
         file_ops_by_session = data.get("_file_ops_by_session", {}) if data else {}
         for s in proj_sessions:
