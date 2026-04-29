@@ -2435,6 +2435,14 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
         <option value="messages-desc">__L_sessions_tab_sort_messages_desc__</option>
         <option value="user_messages-desc">User msgs (most first)</option>
         <option value="user_messages-asc">User msgs (least first)</option>
+        <option value="fs_viewed-desc">Viewed files (most)</option>
+        <option value="fs_viewed-asc">Viewed files (least)</option>
+        <option value="fs_edited-desc">Changed files (most)</option>
+        <option value="fs_edited-asc">Changed files (least)</option>
+        <option value="fs_added-desc">Added files (most)</option>
+        <option value="fs_added-asc">Added files (least)</option>
+        <option value="fs_deleted-desc">Removed files (most)</option>
+        <option value="fs_deleted-asc">Removed files (least)</option>
       </select>
       <input type="text" id="filterSearch" placeholder="__L_sessions_tab_search_placeholder__">
       <span class="meta" id="sessionCount"></span>
@@ -3387,10 +3395,14 @@ function getFilteredSessions() {
     (s.first_prompt || '').toLowerCase().includes(search) ||
     s.project.toLowerCase().includes(search));
 
-  const [key, dir] = sort.split('-');
+  const lastDash = sort.lastIndexOf('-');
+  const key = sort.slice(0, lastDash);
+  const dir = sort.slice(lastDash + 1);
   list.sort((a, b) => {
-    const va = key === 'date' ? a.start : a[key];
-    const vb = key === 'date' ? b.start : b[key];
+    let va, vb;
+    if (key === 'date') { va = a.start; vb = b.start; }
+    else if (key.startsWith('fs_')) { const f = key.slice(3); va = (a.file_stats || {})[f] || 0; vb = (b.file_stats || {})[f] || 0; }
+    else { va = a[key]; vb = b[key]; }
     if (typeof va === 'string') return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
     return dir === 'asc' ? va - vb : vb - va;
   });
