@@ -2500,6 +2500,7 @@ const D = "__DATA_PLACEHOLDER__";
 // ── Helpers ────────────────────────────────────────────────────────────
 const fmt = n => n.toLocaleString(D.locale.locale_code);
 const fmtUSD = n => '$' + n.toLocaleString(D.locale.locale_code, {minimumFractionDigits:2, maximumFractionDigits:2});
+const fmtDuration = m => m == null ? '0m' : m >= 60 ? Math.floor(m/60) + 'h ' + Math.round(m%60) + 'm' : m + 'm';
 const fmtTokens = n => {
   if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
   if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
@@ -3453,7 +3454,7 @@ function buildSessionCard(s) {
   const info = document.createElement('div'); info.className = 'info';
   const infoParts = [
     new Date(s.start).toLocaleString(D.locale.locale_code),
-    s.duration_min + ' min',
+    fmtDuration(s.duration_min),
     fmt(s.messages) + D.locale.sessions_tab.messages_suffix,
     fmt(s.api_calls) + D.locale.sessions_tab.api_calls_suffix,
   ];
@@ -4637,7 +4638,7 @@ document.getElementById('sessionMeta').innerHTML =
 
 const toolCount = Object.values(sess.tools||{}).reduce((s,v)=>s+v,0);
 document.getElementById('statsBar').innerHTML =
-  '<div class="stat-card"><div class="label">Duration</div><div class="value">'+sess.duration_min+'m</div></div>' +
+  '<div class="stat-card"><div class="label">Duration</div><div class="value">'+fmtDuration(sess.duration_min)+'</div></div>' +
   '<div class="stat-card"><div class="label">Messages</div><div class="value" style="color:var(--green)">'+sess.messages+'</div></div>' +
   '<div class="stat-card"><div class="label">Tool Calls</div><div class="value" style="color:var(--cyan)">'+toolCount+'</div></div>' +
   '<div class="stat-card"><div class="label">Tokens</div><div class="value" style="color:var(--purple)">'+fmtTokens(sess.input_tokens+sess.output_tokens)+'</div></div>' +
@@ -6763,7 +6764,7 @@ document.getElementById('sessionList').innerHTML = P.sessions.map(s =>
       '</div>' +
     '</div>' +
     '<div class="info">' +
-      '<span>'+s.duration_min+'m</span>' +
+      '<span>'+fmtDuration(s.duration_min)+'</span>' +
       '<span>'+s.messages+' msgs</span>' +
       '<span>'+fmtTokens(s.input_tokens+s.output_tokens)+' tokens</span>' +
       '<span>'+s.api_calls+' API calls</span>' +
