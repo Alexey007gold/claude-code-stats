@@ -1026,11 +1026,17 @@ def parse_session_transcripts():
                             # User messages
                             if msg_type == "user":
                                 sess["message_count"] += 1
-                                sess["user_message_count"] += 1
 
                                 # Extract errors from tool results
                                 message = obj.get("message", {})
                                 content = message.get("content", "")
+                                # Count only real human-typed messages, not automated tool results
+                                if isinstance(content, str) and content.strip():
+                                    sess["user_message_count"] += 1
+                                elif isinstance(content, list) and any(
+                                    b.get("type") == "text" for b in content if isinstance(b, dict)
+                                ):
+                                    sess["user_message_count"] += 1
                                 if isinstance(content, list):
                                     for block in content:
                                         if isinstance(block, dict) and block.get("is_error"):
@@ -2389,6 +2395,8 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
         <option value="cost-desc">__L_sessions_tab_sort_cost_desc__</option>
         <option value="cost-asc">__L_sessions_tab_sort_cost_asc__</option>
         <option value="messages-desc">__L_sessions_tab_sort_messages_desc__</option>
+        <option value="user_messages-desc">User msgs (most first)</option>
+        <option value="user_messages-asc">User msgs (least first)</option>
       </select>
       <input type="text" id="filterSearch" placeholder="__L_sessions_tab_search_placeholder__">
       <span class="meta" id="sessionCount"></span>
@@ -3455,7 +3463,7 @@ function buildSessionCard(s) {
   const infoParts = [
     new Date(s.start).toLocaleString(D.locale.locale_code),
     fmtDuration(s.duration_min),
-    fmt(s.messages) + D.locale.sessions_tab.messages_suffix,
+    fmt(s.messages) + D.locale.sessions_tab.messages_suffix + (s.user_messages != null ? ' (' + fmt(s.user_messages) + ' user)' : ''),
     fmt(s.api_calls) + D.locale.sessions_tab.api_calls_suffix,
   ];
   infoParts.forEach(t => { const sp = document.createElement('span'); sp.textContent = t; info.appendChild(sp); });
@@ -4626,6 +4634,7 @@ const msgs = S.messages;
 const fmt = n => n.toLocaleString();
 const fmtUSD = n => '$' + n.toFixed(4);
 const fmtTokens = n => { if(n>=1e6) return (n/1e6).toFixed(1)+'M'; if(n>=1e3) return (n/1e3).toFixed(1)+'K'; return n.toString(); };
+const fmtDuration = m => m == null ? '0m' : m >= 60 ? Math.floor(m/60) + 'h ' + Math.round(m%60) + 'm' : m + 'm';
 function escHtml(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 function fmtTime(ts) { if(!ts) return ''; const d=new Date(typeof ts==='number'?ts:ts); return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 function modelClass(m) { const l=(m||'').toLowerCase(); if(l.includes('opus')) return 'opus'; if(l.includes('sonnet')) return 'sonnet'; if(l.includes('haiku')) return 'haiku'; return ''; }
