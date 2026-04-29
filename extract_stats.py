@@ -1677,15 +1677,26 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
                 primary_model = get_model_display(model)
 
         _fops = sess.get("file_ops", [])
-        _written  = {o["path"] for o in _fops if o["op"] == "write"}
-        _edited   = {o["path"] for o in _fops if o["op"] == "edit"}
-        _deleted  = {o["path"] for o in _fops if o["op"] == "delete"}
-        _viewed   = {o["path"] for o in _fops if o["op"] in ("read", "view")}
+        _sorted_ops = sorted(_fops, key=lambda x: x.get("timestamp", ""))
+        # Chronological op list, collapsing consecutive identical (op, path) pairs
+        _file_changes = []
+        for _o in _sorted_ops:
+            if _o["op"] in ("write", "edit", "delete"):
+                if _file_changes and _file_changes[-1]["op"] == _o["op"] and _file_changes[-1]["path"] == _o["path"]:
+                    continue
+                _file_changes.append({"op": _o["op"], "path": _o["path"]})
+        # Viewed: unique paths in first-occurrence order
+        _seen_v: set = set()
+        _viewed_files = []
+        for _o in _sorted_ops:
+            if _o["op"] in ("read", "view") and _o["path"] not in _seen_v:
+                _seen_v.add(_o["path"])
+                _viewed_files.append(_o["path"])
         file_stats = {
-            "added":   len(_written - _deleted),
-            "edited":  len(_edited - _written - _deleted),
-            "deleted": len(_deleted),
-            "viewed":  len(_viewed),
+            "added":   sum(1 for f in _file_changes if f["op"] == "write"),
+            "edited":  sum(1 for f in _file_changes if f["op"] == "edit"),
+            "deleted": sum(1 for f in _file_changes if f["op"] == "delete"),
+            "viewed":  len(_viewed_files),
         }
 
         session_list.append({
@@ -1721,6 +1732,8 @@ def build_dashboard_data(sessions, stats_cache, dot_claude, history,
             "errors": [{"message": e["message"], "tool": e.get("tool", "unknown"), "category": e.get("category", "other"), "timestamp": e.get("timestamp", "")} for e in sess.get("errors", [])],
             "file_ops_count": len(sess.get("file_ops", [])),
             "file_stats": file_stats,
+            "file_changes": _file_changes,
+            "viewed_files": _viewed_files,
             "git_ops": sess.get("git_ops", []),
             "source": sess.get("source", SOURCE_LABEL),
         })
@@ -5169,62 +5182,31 @@ if (tools.length>0) {
     tools.slice(0,15).map(([n,c]) => '<div class="sidebar-row"><span class="label">'+escHtml(n)+'</span><span class="val">'+c+'x</span></div>').join('') +
     '</div>';
 }
-const filesWritten = new Set(), filesEdited = new Set(), filesDeleted = new Set();
-msgs.forEach(m => { (m.tools||[]).forEach(t => {
-  if ((t.name==='Write'||t.name==='NotebookEdit') && t.input && t.input.file_path) filesWritten.add(t.input.file_path);
-  if (t.name==='Edit' && t.input && t.input.file_path) filesEdited.add(t.input.file_path);
-  if (t.name==='Bash' && t.input && t.input.command) {
-    const cmd = t.input.command;
-    for (const m of cmd.matchAll(/\b(?:git\s+rm\s+(?:--\S+\s+)*|rm\s+(?:-\S+\s+)*)([^\s;&|><*?'"]+)/g)) {
-      const p = m[1]; if (p && !p.startsWith('-') && p.includes('.')) filesDeleted.add(p);
-    }
-  }
-}); });
-function normP(p) { return p.replace(/^\\.\\//,''); }
-function isDeleted(f) { if (filesDeleted.has(f)) return true; for (const d of filesDeleted) { const nd=normP(d); if (f===nd||f.endsWith('/'+nd)) return true; } return false; }
-// Build unified set, preferring absolute paths over relative duplicates
-const _rawChanged = new Set([...filesWritten,...filesEdited,...filesDeleted]);
-const allChangedFiles = [..._rawChanged].filter(f => {
-  if (f.startsWith('/')||f.startsWith('~')) return true;
-  const rel = normP(f);
-  return ![..._rawChanged].some(g => g!==f && (g.endsWith('/'+rel)));
-}).sort();
-if (allChangedFiles.length > 0) {
-  const addedCount = allChangedFiles.filter(f => filesWritten.has(f) && !isDeleted(f)).length;
-  const editedCount = allChangedFiles.filter(f => filesEdited.has(f) && !filesWritten.has(f) && !isDeleted(f)).length;
-  const removedCount = allChangedFiles.filter(f => isDeleted(f)).length;
+const fileChanges = sess.file_changes || [];
+const viewedFiles = sess.viewed_files || [];
+if (fileChanges.length > 0) {
+  const addedCount = fileChanges.filter(f => f.op==='write').length;
+  const editedCount = fileChanges.filter(f => f.op==='edit').length;
+  const deletedCount = fileChanges.filter(f => f.op==='delete').length;
   const parts = [];
   if (addedCount) parts.push('<span style="color:var(--green)">+'+addedCount+'</span>');
   if (editedCount) parts.push('<span style="color:var(--blue)">~'+editedCount+'</span>');
-  if (removedCount) parts.push('<span style="color:var(--red)">-'+removedCount+'</span>');
+  if (deletedCount) parts.push('<span style="color:var(--red)">-'+deletedCount+'</span>');
   const hdrSuffix = parts.length ? ' <span style="font-size:10px;font-weight:400;color:var(--text2)">('+parts.join(' ')+')</span>' : '';
+  const FILE_BADGES = {
+    write:  '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(34,197,94,0.15);color:var(--green);margin-left:4px;flex-shrink:0">new</span>',
+    delete: '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(239,68,68,0.15);color:var(--red);margin-left:4px;flex-shrink:0">del</span>',
+  };
   sideHtml += '<div class="sidebar-card"><h4>Files Changed'+hdrSuffix+'</h4>' +
-    allChangedFiles.map(f => {
-      const fname = f.split('/').pop();
-      const isDel = isDeleted(f);
-      const isNew = filesWritten.has(f) && !isDel;
-      const badge = isDel
-        ? '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(239,68,68,0.15);color:var(--red);margin-left:4px;flex-shrink:0">del</span>'
-        : isNew
-          ? '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(34,197,94,0.15);color:var(--green);margin-left:4px;flex-shrink:0">new</span>'
-          : '';
-      const style = isDel ? 'text-decoration:line-through;opacity:0.5;' : '';
-      return '<div class="sidebar-row" style="align-items:center" title="'+escHtml(f)+'">' +
+    fileChanges.map(fc => {
+      const fname = fc.path.split('/').pop();
+      const style = fc.op==='delete' ? 'text-decoration:line-through;opacity:0.5;' : '';
+      return '<div class="sidebar-row" style="align-items:center" title="'+escHtml(fc.path)+'">' +
         '<span style="font-family:monospace;font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;'+style+'">'+escHtml(fname)+'</span>' +
-        badge + '</div>';
+        (FILE_BADGES[fc.op]||'') + '</div>';
     }).join('') +
     '</div>';
 }
-const filesViewed = new Set();
-msgs.forEach(m => { (m.tools||[]).forEach(t => {
-  if (t.name==='Read' && t.input && t.input.file_path) filesViewed.add(t.input.file_path);
-  if (t.name==='Bash' && t.input && t.input.command) {
-    for (const match of t.input.command.matchAll(/\b(cat|head|tail|less|more|bat|wc)\s+(?:-\S+\s+)*([^\s;&|><'"]+)/g)) {
-      const p = match[2]; if (p && !p.startsWith('-') && !p.startsWith('$') && (p.includes('/') || p.includes('.'))) filesViewed.add(p);
-    }
-  }
-}); });
-const viewedFiles = [...filesViewed].sort();
 if (viewedFiles.length > 0) {
   sideHtml += '<div class="sidebar-card"><h4>Files Viewed <span style="font-size:10px;font-weight:400;color:var(--text2)">('+viewedFiles.length+')</span></h4>' +
     viewedFiles.map(f => {
