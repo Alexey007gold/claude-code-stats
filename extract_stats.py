@@ -2313,7 +2313,15 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
     <input type="checkbox" id="hideEmptySessions" checked style="accent-color:var(--accent);cursor:pointer" />
     __L_header_hide_empty__
   </label>
-  <input type="text" id="projectFilter" placeholder="Filter projects..." style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:6px;font-size:12px;width:180px;outline:none;" />
+  <div class="proj-filter" id="globalProjFilter">
+    <button type="button" class="proj-filter-btn" id="globalProjFilterBtn">__L_sessions_tab_all_projects__ &#9662;</button>
+    <div class="proj-filter-drop" id="globalProjFilterDrop">
+      <label class="proj-filter-item proj-filter-selectall">
+        <input type="checkbox" id="globalProjSelectAll" checked> __L_sessions_tab_all_projects__ / None
+      </label>
+      <div id="globalProjFilterList"></div>
+    </div>
+  </div>
   <div class="meta" id="headerMeta"></div>
 </div>
 
@@ -2352,17 +2360,6 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
   </div>
 
   <div class="tab-content" id="tab-activity">
-    <div style="margin-bottom:16px">
-      <div class="proj-filter" id="actProjFilter">
-        <button type="button" class="proj-filter-btn" id="actProjFilterBtn">__L_sessions_tab_all_projects__ &#9662;</button>
-        <div class="proj-filter-drop" id="actProjFilterDrop">
-          <label class="proj-filter-item proj-filter-selectall">
-            <input type="checkbox" id="actProjSelectAll" checked> __L_sessions_tab_all_projects__ / None
-          </label>
-          <div id="actProjFilterList"></div>
-        </div>
-      </div>
-    </div>
     <div class="chart-box heatmap-container">
       <h3>__L_activity_heatmap__</h3>
       <div class="heatmap-scroll">
@@ -2615,7 +2612,62 @@ let currentDays = 0;
 let anonMode = false;
 let agentTypesChartInstance, agentDescsChartInstance, errorByCatChartInstance, errorByToolChartInstance;
 const chartColors = ['#6366f1','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#3b82f6','#f97316','#14b8a6'];
-let currentProjectFilter = '';
+let allGlobalProjNames = [];
+
+function getGlobalCheckedProjects() {
+  return [...document.querySelectorAll('#globalProjFilterList input[type=checkbox]')]
+    .filter(b => b.checked).map(b => b.value);
+}
+
+function updateGlobalProjFilterBtn() {
+  const checked = getGlobalCheckedProjects();
+  const btn = document.getElementById('globalProjFilterBtn');
+  const selectAll = document.getElementById('globalProjSelectAll');
+  const n = allGlobalProjNames.length;
+  if (n === 0 || checked.length === n) {
+    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
+    if (selectAll) { selectAll.checked = true; selectAll.indeterminate = false; }
+  } else if (checked.length === 0) {
+    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
+    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+  } else {
+    btn.textContent = checked.length + ' Project' + (checked.length !== 1 ? 's' : '') + ' \u25be';
+    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = true; }
+  }
+}
+
+function saveGlobalProjFilter() {
+  try { localStorage.setItem('ccstats_globalProjFilter', JSON.stringify(getGlobalCheckedProjects())); } catch(e) {}
+}
+
+function restoreGlobalProjFilter() {
+  try {
+    const saved = localStorage.getItem('ccstats_globalProjFilter');
+    if (!saved) return;
+    const savedSet = new Set(JSON.parse(saved));
+    document.querySelectorAll('#globalProjFilterList input[type=checkbox]').forEach(cb => {
+      cb.checked = savedSet.has(cb.value);
+    });
+  } catch(e) {}
+}
+
+function buildGlobalProjFilterList(projects) {
+  allGlobalProjNames = projects;
+  const list = document.getElementById('globalProjFilterList');
+  list.innerHTML = '';
+  projects.forEach(p => {
+    const label = document.createElement('label');
+    label.className = 'proj-filter-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = p; cb.checked = true;
+    cb.addEventListener('change', () => { saveGlobalProjFilter(); updateGlobalProjFilterBtn(); applyFilter(currentDays); });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(anonMode ? anonName(p) : p));
+    list.appendChild(label);
+  });
+  restoreGlobalProjFilter();
+  updateGlobalProjFilterBtn();
+}
 
 function calcFilteredPlanCost(filteredDates) {
   if (!filteredDates.length || !D.plan) return D.kpi.actual_plan_cost;
@@ -2642,9 +2694,8 @@ function calcFilteredPlanCost(filteredDates) {
   return Math.round(cost * 100) / 100;
 }
 
-function filterData(days, projectFilter) {
+function filterData(days) {
   if (days !== undefined) currentDays = days;
-  if (projectFilter !== undefined) currentProjectFilter = projectFilter;
 
   let cutoff = '';
   if (currentDays > 0) {
@@ -2653,14 +2704,16 @@ function filterData(days, projectFilter) {
     cutoff = d.toISOString().slice(0, 10);
   }
 
-  const pf = currentProjectFilter.toLowerCase().trim();
+  const checkedProjects = getGlobalCheckedProjects();
+  const useProjectFilter = checkedProjects.length > 0 && checkedProjects.length < allGlobalProjNames.length;
+  const projSet = useProjectFilter ? new Set(checkedProjects) : null;
 
   // Filter sessions by date AND project
   const hideEmpty = document.getElementById('hideEmptySessions')?.checked;
   let filteredSessions = D.sessions;
   if (hideEmpty) filteredSessions = filteredSessions.filter(s => s.messages > 0 || s.output_tokens > 0);
   if (cutoff) filteredSessions = filteredSessions.filter(s => s.date >= cutoff);
-  if (pf) filteredSessions = filteredSessions.filter(s => (s.project || '').toLowerCase().includes(pf));
+  if (projSet) filteredSessions = filteredSessions.filter(s => projSet.has(s.project));
   F.sessions = filteredSessions;
 
   // Rebuild daily aggregates from filtered sessions
@@ -2836,8 +2889,11 @@ function initTimeFilter() {
   });
 }
 
-function applyFilter(days, projectFilter) {
-  filterData(days, projectFilter);
+function applyFilter(days) {
+  filterData(days);
+
+  // Rebuild global project filter labels (handles anonMode label update)
+  if (allGlobalProjNames.length) buildGlobalProjFilterList(allGlobalProjNames);
 
   // Destroy all existing Chart.js instances
   Object.keys(charts).forEach(k => { if (charts[k]) { charts[k].destroy(); delete charts[k]; } });
@@ -3105,69 +3161,6 @@ function renderHeatmap(daily_messages) {
 }
 
 // ── Tab 2: Activity ────────────────────────────────────────────────────
-let allActivityProjNames = [];
-
-function getActivityCheckedProjects() {
-  return [...document.querySelectorAll('#actProjFilterList input[type=checkbox]')]
-    .filter(b => b.checked).map(b => b.value);
-}
-
-function updateActivityProjFilterBtn() {
-  const checked = getActivityCheckedProjects();
-  const btn = document.getElementById('actProjFilterBtn');
-  const selectAll = document.getElementById('actProjSelectAll');
-  const n = allActivityProjNames.length;
-  if (n === 0 || checked.length === n) {
-    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
-    if (selectAll) { selectAll.checked = true; selectAll.indeterminate = false; }
-  } else if (checked.length === 0) {
-    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
-    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
-  } else {
-    btn.textContent = checked.length + ' Project' + (checked.length !== 1 ? 's' : '') + ' \u25be';
-    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = true; }
-  }
-}
-
-function saveActivityProjFilter() {
-  try { localStorage.setItem('ccstats_activityProjFilter', JSON.stringify(getActivityCheckedProjects())); } catch(e) {}
-}
-
-function restoreActivityProjFilter() {
-  try {
-    const saved = localStorage.getItem('ccstats_activityProjFilter');
-    if (!saved) return;
-    const savedSet = new Set(JSON.parse(saved));
-    document.querySelectorAll('#actProjFilterList input[type=checkbox]').forEach(cb => {
-      cb.checked = savedSet.has(cb.value);
-    });
-  } catch(e) {}
-}
-
-function buildActivityProjFilterList(projects) {
-  allActivityProjNames = projects;
-  const list = document.getElementById('actProjFilterList');
-  list.innerHTML = '';
-  projects.forEach(p => {
-    const label = document.createElement('label');
-    label.className = 'proj-filter-item';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.value = p; cb.checked = true;
-    cb.addEventListener('change', () => { saveActivityProjFilter(); updateActivityProjFilterBtn(); reRenderActivity(); });
-    label.appendChild(cb);
-    label.appendChild(document.createTextNode(anonMode ? anonName(p) : p));
-    list.appendChild(label);
-  });
-  restoreActivityProjFilter();
-  updateActivityProjFilterBtn();
-}
-
-function getActivityFilteredSessions() {
-  const checked = getActivityCheckedProjects();
-  if (checked.length === 0 || checked.length === allActivityProjNames.length) return F.sessions;
-  const projSet = new Set(checked);
-  return F.sessions.filter(s => projSet.has(s.project));
-}
 
 function computeActivityAggregates(sessions) {
   const dailyMsgMap = {};
@@ -3234,12 +3227,10 @@ function reRenderActivity() {
   ['dailyMsgs', 'hourly', 'weekday', 'dailySessions'].forEach(k => {
     if (charts[k]) { charts[k].destroy(); delete charts[k]; }
   });
-  renderActivityCharts(computeActivityAggregates(getActivityFilteredSessions()));
+  renderActivityCharts(computeActivityAggregates(F.sessions));
 }
 
 function renderActivity() {
-  const projects = [...new Set(F.sessions.map(s => s.project))].sort();
-  buildActivityProjFilterList(projects);
   reRenderActivity();
 }
 
@@ -4207,21 +4198,22 @@ document.querySelectorAll('.sortable th[data-sort]').forEach(th => {
 });
 
 // ── Filter events ──────────────────────────────────────────────────────
-// Activity tab project multi-select dropdown
-(function initActivityProjFilter() {
-  const btn = document.getElementById('actProjFilterBtn');
-  const drop = document.getElementById('actProjFilterDrop');
-  const selectAll = document.getElementById('actProjSelectAll');
+// Global project multi-select dropdown
+(function initGlobalProjFilter() {
+  const btn = document.getElementById('globalProjFilterBtn');
+  const drop = document.getElementById('globalProjFilterDrop');
+  const selectAll = document.getElementById('globalProjSelectAll');
   btn.addEventListener('click', e => { e.stopPropagation(); drop.classList.toggle('open'); });
   document.addEventListener('click', e => {
-    if (!document.getElementById('actProjFilter').contains(e.target)) drop.classList.remove('open');
+    if (!document.getElementById('globalProjFilter').contains(e.target)) drop.classList.remove('open');
   });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') drop.classList.remove('open'); });
   selectAll.addEventListener('change', () => {
-    document.querySelectorAll('#actProjFilterList input[type=checkbox]').forEach(b => { b.checked = selectAll.checked; });
+    document.querySelectorAll('#globalProjFilterList input[type=checkbox]').forEach(b => { b.checked = selectAll.checked; });
     selectAll.indeterminate = false;
-    saveActivityProjFilter();
-    updateActivityProjFilterBtn();
-    reRenderActivity();
+    saveGlobalProjFilter();
+    updateGlobalProjFilterBtn();
+    applyFilter(currentDays);
   });
 })();
 
@@ -4255,13 +4247,10 @@ document.getElementById('filterSearch').addEventListener('input', () => {
 document.getElementById('hideEmptySessions').addEventListener('change', () => { applyFilter(currentDays); });
 
 // ── Init ───────────────────────────────────────────────────────────────
-filterData(0, '');
+const _allProjects = [...new Set(D.sessions.map(s => s.project))].filter(Boolean).sort();
+buildGlobalProjFilterList(_allProjects);
+filterData(0);
 initTimeFilter();
-let pfTimer;
-document.getElementById('projectFilter').addEventListener('input', function() {
-  clearTimeout(pfTimer);
-  pfTimer = setTimeout(() => applyFilter(undefined, this.value), 300);
-});
 initTabs();
 try {
   const hashTab = location.hash.slice(1);
