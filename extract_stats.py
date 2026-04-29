@@ -2121,6 +2121,15 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .session-filters { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
 .session-filters select, .session-filters input { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:8px; font-size:13px; }
 .session-filters select { min-width:200px; }
+.proj-filter { position:relative; }
+.proj-filter-btn { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:8px; font-size:13px; min-width:160px; cursor:pointer; text-align:left; white-space:nowrap; }
+.proj-filter-btn:hover { border-color:var(--accent,#6e8cff); }
+.proj-filter-drop { display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:200; background:var(--bg3); border:1px solid var(--border); border-radius:8px; min-width:220px; max-height:300px; overflow-y:auto; box-shadow:0 4px 16px rgba(0,0,0,.3); }
+.proj-filter-drop.open { display:block; }
+.proj-filter-item { display:flex; align-items:center; gap:8px; padding:7px 12px; font-size:13px; cursor:pointer; user-select:none; }
+.proj-filter-item:hover { background:var(--bg2); }
+.proj-filter-item input[type=checkbox] { cursor:pointer; width:14px; height:14px; flex-shrink:0; margin:0; }
+.proj-filter-selectall { font-weight:600; border-bottom:1px solid var(--border); }
 .bulk-download-btn { padding: 6px 14px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); background: var(--bg2); color: var(--text2); cursor: pointer; border-radius: 6px; transition: all 0.15s; display: inline-flex; align-items: center; gap: 4px; }
 .bulk-download-btn:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
 .bulk-download-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -2229,6 +2238,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
   .data-table { min-width:500px; }
   .session-filters { gap:8px; }
   .session-filters select { min-width:0; flex:1; }
+  .proj-filter-btn { min-width:0; flex:1; }
   .session-filters input { flex:1; min-width:0; }
   .config-grid { grid-template-columns:1fr; }
   .misc-stat-grid { grid-template-columns:1fr; }
@@ -2298,6 +2308,17 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
   </div>
 
   <div class="tab-content" id="tab-activity">
+    <div style="margin-bottom:16px">
+      <div class="proj-filter" id="actProjFilter">
+        <button type="button" class="proj-filter-btn" id="actProjFilterBtn">__L_sessions_tab_all_projects__ &#9662;</button>
+        <div class="proj-filter-drop" id="actProjFilterDrop">
+          <label class="proj-filter-item proj-filter-selectall">
+            <input type="checkbox" id="actProjSelectAll" checked> __L_sessions_tab_all_projects__ / None
+          </label>
+          <div id="actProjFilterList"></div>
+        </div>
+      </div>
+    </div>
     <div class="chart-box heatmap-container">
       <h3>__L_activity_heatmap__</h3>
       <div class="heatmap-scroll">
@@ -2352,7 +2373,15 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 
   <div class="tab-content" id="tab-sessions">
     <div class="session-filters">
-      <select id="filterProject"><option value="">__L_sessions_tab_all_projects__</option></select>
+      <div class="proj-filter" id="projFilter">
+        <button type="button" class="proj-filter-btn" id="projFilterBtn">__L_sessions_tab_all_projects__ &#9662;</button>
+        <div class="proj-filter-drop" id="projFilterDrop">
+          <label class="proj-filter-item proj-filter-selectall">
+            <input type="checkbox" id="projSelectAll" checked> __L_sessions_tab_all_projects__ / None
+          </label>
+          <div id="projFilterList"></div>
+        </div>
+      </div>
       <select id="filterSource"><option value="">All Sources</option></select>
       <select id="filterSort">
         <option value="date-desc">__L_sessions_tab_sort_date_desc__</option>
@@ -2858,6 +2887,7 @@ function initTabs() {
   TAB_NAMES.forEach((t, i) => {
     const btn = document.createElement('button');
     btn.className = 'tab-btn' + (i === 0 ? ' active' : '');
+    btn.dataset.tab = t.id;
     btn.textContent = t.label;
     btn.addEventListener('click', () => switchTab(t.id, btn));
     bar.appendChild(btn);
@@ -2869,6 +2899,7 @@ function switchTab(name, btn) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
+  try { localStorage.setItem('ccstats_activeTab', name); } catch(e) {}
 }
 
 // ── Tab 1: Costs ───────────────────────────────────────────────────────
@@ -2963,12 +2994,12 @@ function renderCosts() {
   }
 }
 
-function renderHeatmap() {
+function renderHeatmap(daily_messages) {
   const container = document.getElementById('activityHeatmap');
   const monthsEl = document.getElementById('heatmapMonths');
   if (!container) return;
   const msgMap = {};
-  F.daily_messages.forEach(d => { msgMap[d.date] = d.messages; });
+  daily_messages.forEach(d => { msgMap[d.date] = d.messages; });
   const today = new Date();
   const startDate = new Date(today);
   startDate.setDate(startDate.getDate() - (24 * 7) + 1);
@@ -3018,21 +3049,106 @@ function renderHeatmap() {
 }
 
 // ── Tab 2: Activity ────────────────────────────────────────────────────
-function renderActivity() {
+let allActivityProjNames = [];
+
+function getActivityCheckedProjects() {
+  return [...document.querySelectorAll('#actProjFilterList input[type=checkbox]')]
+    .filter(b => b.checked).map(b => b.value);
+}
+
+function updateActivityProjFilterBtn() {
+  const checked = getActivityCheckedProjects();
+  const btn = document.getElementById('actProjFilterBtn');
+  const selectAll = document.getElementById('actProjSelectAll');
+  const n = allActivityProjNames.length;
+  if (n === 0 || checked.length === n) {
+    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
+    if (selectAll) { selectAll.checked = true; selectAll.indeterminate = false; }
+  } else if (checked.length === 0) {
+    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
+    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+  } else {
+    btn.textContent = checked.length + ' Project' + (checked.length !== 1 ? 's' : '') + ' \u25be';
+    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = true; }
+  }
+}
+
+function saveActivityProjFilter() {
+  try { localStorage.setItem('ccstats_activityProjFilter', JSON.stringify(getActivityCheckedProjects())); } catch(e) {}
+}
+
+function restoreActivityProjFilter() {
+  try {
+    const saved = localStorage.getItem('ccstats_activityProjFilter');
+    if (!saved) return;
+    const savedSet = new Set(JSON.parse(saved));
+    document.querySelectorAll('#actProjFilterList input[type=checkbox]').forEach(cb => {
+      cb.checked = savedSet.has(cb.value);
+    });
+  } catch(e) {}
+}
+
+function buildActivityProjFilterList(projects) {
+  allActivityProjNames = projects;
+  const list = document.getElementById('actProjFilterList');
+  list.innerHTML = '';
+  projects.forEach(p => {
+    const label = document.createElement('label');
+    label.className = 'proj-filter-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = p; cb.checked = true;
+    cb.addEventListener('change', () => { saveActivityProjFilter(); updateActivityProjFilterBtn(); reRenderActivity(); });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(anonMode ? anonName(p) : p));
+    list.appendChild(label);
+  });
+  restoreActivityProjFilter();
+  updateActivityProjFilterBtn();
+}
+
+function getActivityFilteredSessions() {
+  const checked = getActivityCheckedProjects();
+  if (checked.length === 0 || checked.length === allActivityProjNames.length) return F.sessions;
+  const projSet = new Set(checked);
+  return F.sessions.filter(s => projSet.has(s.project));
+}
+
+function computeActivityAggregates(sessions) {
+  const dailyMsgMap = {};
+  sessions.forEach(s => {
+    if (!s.date) return;
+    if (!dailyMsgMap[s.date]) dailyMsgMap[s.date] = {date: s.date, messages: 0, sessions: 0};
+    dailyMsgMap[s.date].messages += s.messages || 0;
+    dailyMsgMap[s.date].sessions += 1;
+  });
+  const daily_messages = Object.keys(dailyMsgMap).sort().map(d => dailyMsgMap[d]);
+
+  const hourly = Array.from({length:24}, (_, i) => ({hour: i, messages: 0}));
+  sessions.forEach(s => { if (s.start) hourly[new Date(s.start).getHours()].messages += s.messages || 0; });
+
+  const weekdayMsgs = [0,0,0,0,0,0,0];
+  sessions.forEach(s => { if (s.start) weekdayMsgs[new Date(s.start).getDay()] += s.messages || 0; });
+  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const weekday_distribution = [1,2,3,4,5,6,0].map(i => ({day: dayNames[i], messages: weekdayMsgs[i]}));
+
+  return {daily_messages, hourly_distribution: hourly, weekday_distribution};
+}
+
+function renderActivityCharts(agg) {
   charts.dailyMsgs = new Chart(document.getElementById('chartDailyMsgs'), {
     type: 'bar',
-    data: { labels: F.daily_messages.map(d => d.date),
-      datasets: [{ label: D.locale.activity.messages_label, data: F.daily_messages.map(d => d.messages), backgroundColor: '#6366f1', borderRadius: 3 }] },
+    data: { labels: agg.daily_messages.map(d => d.date),
+      datasets: [{ label: D.locale.activity.messages_label, data: agg.daily_messages.map(d => d.messages), backgroundColor: '#6366f1', borderRadius: 3 }] },
     options: { responsive: true, maintainAspectRatio: false,
       plugins: { legend: { labels: { color: '#94a3b8' } } }, scales: scaleDefaults }
   });
 
-  const maxHourly = Math.max(...F.hourly_distribution.map(x => x.messages || 1));
+  const maxHourly = Math.max(...agg.hourly_distribution.map(x => x.messages || 1));
   charts.hourly = new Chart(document.getElementById('chartHourly'), {
     type: 'polarArea',
-    data: { labels: F.hourly_distribution.map(h => h.hour + ':00'),
-      datasets: [{ data: F.hourly_distribution.map(h => h.messages),
-        backgroundColor: F.hourly_distribution.map(h => 'rgba(99,102,241,' + (0.3 + 0.7 * (h.messages / maxHourly)) + ')'),
+    data: { labels: agg.hourly_distribution.map(h => h.hour + ':00'),
+      datasets: [{ data: agg.hourly_distribution.map(h => h.messages),
+        backgroundColor: agg.hourly_distribution.map(h => 'rgba(99,102,241,' + (0.3 + 0.7 * (h.messages / maxHourly)) + ')'),
         borderWidth: 1, borderColor: '#2d3348' }] },
     options: { responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
@@ -3041,21 +3157,34 @@ function renderActivity() {
 
   charts.weekday = new Chart(document.getElementById('chartWeekday'), {
     type: 'bar',
-    data: { labels: F.weekday_distribution.map(d => d.day),
-      datasets: [{ label: D.locale.activity.messages_label, data: F.weekday_distribution.map(d => d.messages),
-        backgroundColor: F.weekday_distribution.map((d, i) => i >= 5 ? '#f59e0b' : '#6366f1'), borderRadius: 4 }] },
+    data: { labels: agg.weekday_distribution.map(d => d.day),
+      datasets: [{ label: D.locale.activity.messages_label, data: agg.weekday_distribution.map(d => d.messages),
+        backgroundColor: agg.weekday_distribution.map((d, i) => i >= 5 ? '#f59e0b' : '#6366f1'), borderRadius: 4 }] },
     options: { responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } }, scales: scaleDefaults }
   });
 
   charts.dailySessions = new Chart(document.getElementById('chartDailySessions'), {
     type: 'bar',
-    data: { labels: F.daily_messages.map(d => d.date),
-      datasets: [{ label: D.locale.activity.sessions_label, data: F.daily_messages.map(d => d.sessions), backgroundColor: '#06b6d4', borderRadius: 3 }] },
+    data: { labels: agg.daily_messages.map(d => d.date),
+      datasets: [{ label: D.locale.activity.sessions_label, data: agg.daily_messages.map(d => d.sessions), backgroundColor: '#06b6d4', borderRadius: 3 }] },
     options: { responsive: true, maintainAspectRatio: false,
       plugins: { legend: { labels: { color: '#94a3b8' } } }, scales: scaleDefaults }
   });
-  renderHeatmap();
+  renderHeatmap(agg.daily_messages);
+}
+
+function reRenderActivity() {
+  ['dailyMsgs', 'hourly', 'weekday', 'dailySessions'].forEach(k => {
+    if (charts[k]) { charts[k].destroy(); delete charts[k]; }
+  });
+  renderActivityCharts(computeActivityAggregates(getActivityFilteredSessions()));
+}
+
+function renderActivity() {
+  const projects = [...new Set(F.sessions.map(s => s.project))].sort();
+  buildActivityProjFilterList(projects);
+  reRenderActivity();
 }
 
 // ── Tab 3: Projects ────────────────────────────────────────────────────
@@ -3111,6 +3240,7 @@ function renderProjectTable(sortKey, sortDir) {
 
 // ── Tab 4: Sessions ────────────────────────────────────────────────────
 let sessionPage = 0;
+let allProjectNames = [];
 const SESSION_PER_PAGE = 20;
 
 // ─── Markdown export helpers ───────────────────────────────────────────
@@ -3196,12 +3326,15 @@ function loadJSZip() {
 
 function getFilteredSessions() {
   let list = [...F.sessions];
-  const proj = document.getElementById('filterProject').value;
+  const checkedProjects = getCheckedProjects();
   const src = document.getElementById('filterSource').value;
   const search = document.getElementById('filterSearch').value.toLowerCase();
   const sort = document.getElementById('filterSort').value;
 
-  if (proj) list = list.filter(s => s.project === proj);
+  if (checkedProjects.length > 0 && checkedProjects.length < allProjectNames.length) {
+    const projSet = new Set(checkedProjects);
+    list = list.filter(s => projSet.has(s.project));
+  }
   if (src) list = list.filter(s => s.source === src);
   if (search) list = list.filter(s =>
     (s.first_prompt || '').toLowerCase().includes(search) ||
@@ -3218,18 +3351,8 @@ function getFilteredSessions() {
 }
 
 function renderSessions() {
-  const sel = document.getElementById('filterProject');
-  const currentVal = sel.value;
-  // Clear and rebuild options from filtered sessions
-  while (sel.options.length > 1) sel.remove(1);
   const projects = [...new Set(F.sessions.map(s => s.project))].sort();
-  projects.forEach(p => {
-    const o = document.createElement('option');
-    o.value = p; o.textContent = anonMode ? anonName(p) : p;
-    sel.appendChild(o);
-  });
-  // Restore selection if still valid
-  if (projects.includes(currentVal)) sel.value = currentVal;
+  buildProjFilterList(projects);
 
   // Source filter
   const srcSel = document.getElementById('filterSource');
@@ -3245,6 +3368,61 @@ function renderSessions() {
 
   sessionPage = 0;
   renderSessionList();
+}
+
+function getCheckedProjects() {
+  return [...document.querySelectorAll('#projFilterList input[type=checkbox]')]
+    .filter(b => b.checked).map(b => b.value);
+}
+
+function updateProjFilterBtn() {
+  const checked = getCheckedProjects();
+  const btn = document.getElementById('projFilterBtn');
+  const selectAll = document.getElementById('projSelectAll');
+  const n = allProjectNames.length;
+  if (n === 0 || checked.length === n) {
+    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
+    if (selectAll) { selectAll.checked = true; selectAll.indeterminate = false; }
+  } else if (checked.length === 0) {
+    btn.textContent = '__L_sessions_tab_all_projects__ \u25be';
+    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+  } else {
+    btn.textContent = checked.length + ' Project' + (checked.length !== 1 ? 's' : '') + ' \u25be';
+    if (selectAll) { selectAll.checked = false; selectAll.indeterminate = true; }
+  }
+}
+
+function saveProjFilter() {
+  try { localStorage.setItem('ccstats_projFilter', JSON.stringify(getCheckedProjects())); } catch(e) {}
+}
+
+function restoreProjFilter() {
+  try {
+    const saved = localStorage.getItem('ccstats_projFilter');
+    if (!saved) return;
+    const savedSet = new Set(JSON.parse(saved));
+    document.querySelectorAll('#projFilterList input[type=checkbox]').forEach(cb => {
+      cb.checked = savedSet.has(cb.value);
+    });
+  } catch(e) {}
+}
+
+function buildProjFilterList(projects) {
+  allProjectNames = projects;
+  const list = document.getElementById('projFilterList');
+  list.innerHTML = '';
+  projects.forEach(p => {
+    const label = document.createElement('label');
+    label.className = 'proj-filter-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = p; cb.checked = true;
+    cb.addEventListener('change', () => { saveProjFilter(); updateProjFilterBtn(); sessionPage = 0; renderSessionList(); });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(anonMode ? anonName(p) : p));
+    list.appendChild(label);
+  });
+  restoreProjFilter();
+  updateProjFilterBtn();
 }
 
 function buildSessionCard(s) {
@@ -3955,10 +4133,51 @@ document.querySelectorAll('.sortable th[data-sort]').forEach(th => {
 });
 
 // ── Filter events ──────────────────────────────────────────────────────
-document.getElementById('filterProject').addEventListener('change', () => { sessionPage = 0; renderSessionList(); });
+// Activity tab project multi-select dropdown
+(function initActivityProjFilter() {
+  const btn = document.getElementById('actProjFilterBtn');
+  const drop = document.getElementById('actProjFilterDrop');
+  const selectAll = document.getElementById('actProjSelectAll');
+  btn.addEventListener('click', e => { e.stopPropagation(); drop.classList.toggle('open'); });
+  document.addEventListener('click', e => {
+    if (!document.getElementById('actProjFilter').contains(e.target)) drop.classList.remove('open');
+  });
+  selectAll.addEventListener('change', () => {
+    document.querySelectorAll('#actProjFilterList input[type=checkbox]').forEach(b => { b.checked = selectAll.checked; });
+    selectAll.indeterminate = false;
+    saveActivityProjFilter();
+    updateActivityProjFilterBtn();
+    reRenderActivity();
+  });
+})();
+
+// Sessions tab project multi-select dropdown
+(function initProjFilter() {
+  const btn = document.getElementById('projFilterBtn');
+  const drop = document.getElementById('projFilterDrop');
+  const selectAll = document.getElementById('projSelectAll');
+  btn.addEventListener('click', e => { e.stopPropagation(); drop.classList.toggle('open'); });
+  document.addEventListener('click', e => {
+    if (!document.getElementById('projFilter').contains(e.target)) drop.classList.remove('open');
+  });
+  selectAll.addEventListener('change', () => {
+    document.querySelectorAll('#projFilterList input[type=checkbox]').forEach(b => { b.checked = selectAll.checked; });
+    selectAll.indeterminate = false;
+    saveProjFilter();
+    updateProjFilterBtn();
+    sessionPage = 0;
+    renderSessionList();
+  });
+})();
 document.getElementById('filterSource').addEventListener('change', () => { sessionPage = 0; renderSessionList(); });
-document.getElementById('filterSort').addEventListener('change', () => { sessionPage = 0; renderSessionList(); });
-document.getElementById('filterSearch').addEventListener('input', () => { sessionPage = 0; renderSessionList(); });
+document.getElementById('filterSort').addEventListener('change', () => {
+  try { localStorage.setItem('ccstats_filterSort', document.getElementById('filterSort').value); } catch(e) {}
+  sessionPage = 0; renderSessionList();
+});
+document.getElementById('filterSearch').addEventListener('input', () => {
+  try { localStorage.setItem('ccstats_filterSearch', document.getElementById('filterSearch').value); } catch(e) {}
+  sessionPage = 0; renderSessionList();
+});
 document.getElementById('hideEmptySessions').addEventListener('change', () => { applyFilter(currentDays); });
 
 // ── Init ───────────────────────────────────────────────────────────────
@@ -3970,10 +4189,23 @@ document.getElementById('projectFilter').addEventListener('input', function() {
   pfTimer = setTimeout(() => applyFilter(undefined, this.value), 300);
 });
 initTabs();
+try {
+  const savedTab = localStorage.getItem('ccstats_activeTab');
+  if (savedTab) {
+    const btn = document.querySelector(`.tab-btn[data-tab="${savedTab}"]`);
+    if (btn) switchTab(savedTab, btn);
+  }
+} catch(e) {}
 renderKPI();
 renderCosts();
 renderActivity();
 renderProjects();
+try {
+  const savedSort = localStorage.getItem('ccstats_filterSort');
+  if (savedSort) document.getElementById('filterSort').value = savedSort;
+  const savedSearch = localStorage.getItem('ccstats_filterSearch');
+  if (savedSearch) document.getElementById('filterSearch').value = savedSearch;
+} catch(e) {}
 renderSessions();
 document.getElementById('bulkDownloadBtn').addEventListener('click', bulkDownloadSessions);
 renderPlan();
@@ -4208,11 +4440,11 @@ def generate_session_pages(sessions, session_list, history=None):
         session_json = json.dumps({
             "session": sess_data,
             "messages": messages,
-        }, ensure_ascii=False)
+        }, ensure_ascii=False).replace('</', r'<\/')
 
         html = _get_session_html_template()
         html = html.replace('"__SESSION_DATA__"', session_json)
-        flow_json = json.dumps(flow_data, ensure_ascii=False, separators=(',', ':'))
+        flow_json = json.dumps(flow_data, ensure_ascii=False, separators=(',', ':')).replace('</', r'<\/')
         html = html.replace('"__FLOW_DATA__"', flow_json)
         html = html.replace('__VERSION__', VERSION)
 
