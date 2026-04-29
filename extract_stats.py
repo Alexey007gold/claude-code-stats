@@ -5132,6 +5132,44 @@ if (tools.length>0) {
     tools.slice(0,15).map(([n,c]) => '<div class="sidebar-row"><span class="label">'+escHtml(n)+'</span><span class="val">'+c+'x</span></div>').join('') +
     '</div>';
 }
+const filesWritten = new Set(), filesEdited = new Set(), filesDeleted = new Set();
+msgs.forEach(m => { (m.tools||[]).forEach(t => {
+  if ((t.name==='Write'||t.name==='NotebookEdit') && t.input && t.input.file_path) filesWritten.add(t.input.file_path);
+  if (t.name==='Edit' && t.input && t.input.file_path) filesEdited.add(t.input.file_path);
+  if (t.name==='Bash' && t.input && t.input.command) {
+    const cmd = t.input.command;
+    for (const m of cmd.matchAll(/\b(?:git\s+rm\s+(?:--\S+\s+)*|rm\s+(?:-\S+\s+)*)([^\s;&|><*?'"]+)/g)) {
+      const p = m[1]; if (p && !p.startsWith('-') && p.includes('.')) filesDeleted.add(p);
+    }
+  }
+}); });
+const allChangedFiles = [...new Set([...filesWritten,...filesEdited,...filesDeleted])].sort();
+if (allChangedFiles.length > 0) {
+  const addedCount = [...filesWritten].filter(f => !filesDeleted.has(f)).length;
+  const editedCount = [...filesEdited].filter(f => !filesWritten.has(f) && !filesDeleted.has(f)).length;
+  const removedCount = filesDeleted.size;
+  const parts = [];
+  if (addedCount) parts.push('<span style="color:var(--green)">+'+addedCount+'</span>');
+  if (editedCount) parts.push('<span style="color:var(--blue)">~'+editedCount+'</span>');
+  if (removedCount) parts.push('<span style="color:var(--red)">-'+removedCount+'</span>');
+  const hdrSuffix = parts.length ? ' <span style="font-size:10px;font-weight:400;color:var(--text2)">('+parts.join(' ')+')</span>' : '';
+  sideHtml += '<div class="sidebar-card"><h4>Files Changed'+hdrSuffix+'</h4>' +
+    allChangedFiles.map(f => {
+      const fname = f.split('/').pop();
+      const isDel = filesDeleted.has(f);
+      const isNew = filesWritten.has(f) && !isDel;
+      const badge = isDel
+        ? '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(239,68,68,0.15);color:var(--red);margin-left:4px;flex-shrink:0">del</span>'
+        : isNew
+          ? '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(34,197,94,0.15);color:var(--green);margin-left:4px;flex-shrink:0">new</span>'
+          : '';
+      const style = isDel ? 'text-decoration:line-through;opacity:0.5;' : '';
+      return '<div class="sidebar-row" style="align-items:center" title="'+escHtml(f)+'">' +
+        '<span style="font-family:monospace;font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;'+style+'">'+escHtml(fname)+'</span>' +
+        badge + '</div>';
+    }).join('') +
+    '</div>';
+}
 const skills = Object.entries(sess.skills||{}).sort((a,b)=>b[1]-a[1]);
 if (skills.length>0) {
   sideHtml += '<div class="sidebar-card"><h4>Skills Used</h4>' +
