@@ -4596,6 +4596,13 @@ a:hover { text-decoration:underline; }
 .msg-time { color:var(--text2); }
 .msg-model { margin-left:auto; }
 .msg-tokens { color:var(--text2); font-size:11px; font-family:monospace; }
+.msg-copy-btn { margin-left:auto; background:none; border:none; color:var(--text2); cursor:pointer; padding:2px 5px; border-radius:4px; font-size:12px; opacity:0; transition:opacity 0.15s, color 0.15s; line-height:1; }
+.msg:hover .msg-copy-btn { opacity:0.5; }
+.msg-copy-btn:hover { opacity:1 !important; color:var(--text); }
+.msg-copy-btn.copied { opacity:1 !important; color:var(--green); }
+.tp-copy-btn { background:none; border:1px solid var(--border); color:var(--text2); cursor:pointer; padding:2px 8px; border-radius:4px; font-size:11px; transition:all 0.15s; }
+.tp-copy-btn:hover { background:var(--bg3); color:var(--text); }
+.tp-copy-btn.copied { border-color:var(--green); color:var(--green); }
 .msg-content { font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word; }
 .msg-content code { background:var(--bg); padding:1px 4px; border-radius:3px; font-size:12px; }
 .msg-content pre { background:var(--bg); border-radius:6px; padding:12px; margin:8px 0; overflow-x:auto; }
@@ -4755,6 +4762,7 @@ msgs.forEach((m,i) => {
         '<span class="msg-time">'+fmtTime(m.timestamp)+'</span>' +
         (m.model ? '<span class="msg-model"><span class="model-badge '+modelClass(m.model)+'">'+escHtml(m.model)+'</span></span>' : '') +
         (m.tokens ? '<span class="msg-tokens">'+fmtTokens(m.tokens.input)+'in / '+fmtTokens(m.tokens.output)+'out</span>' : '') +
+        '<button class="msg-copy-btn" data-copy-idx="'+i+'" title="Copy message">&#128203;</button>' +
       '</div>' +
       '<div class="msg-content" id="mc'+i+'">'+renderMd(display)+'</div>' +
       (isLong ? '<div class="msg-expand" data-idx="'+i+'">Show full message ('+(m.content.length/1000).toFixed(1)+'K chars)</div>' : '') +
@@ -4996,15 +5004,16 @@ function balanceCodeBlocks(bodyEl, budget) {
 
 const toolPopup = document.createElement('div');
 toolPopup.className = 'tool-input-popup';
-toolPopup.innerHTML = '<div class="tool-input-popup-header"><span id="popupTitle"></span><span class="tool-input-popup-close" id="popupClose">&#x2715;</span></div><div class="tool-input-popup-body" id="popupBody"></div>';
+toolPopup.innerHTML = '<div class="tool-input-popup-header"><span id="popupTitle"></span><span style="display:flex;gap:6px;align-items:center;margin-left:auto"><button class="tp-copy-btn" id="popupCopyCmd">Copy Command</button><button class="tp-copy-btn" id="popupCopyResult">Copy Result</button><span class="tool-input-popup-close" id="popupClose">&#x2715;</span></span></div><div class="tool-input-popup-body" id="popupBody"></div>';
 document.body.appendChild(toolPopup);
-function closePopup() { toolPopup.style.display = 'none'; activeToolBadge = null; }
+function closePopup() { toolPopup.style.display = 'none'; activeToolBadge = null; activeEntry = null; }
 document.getElementById('popupClose').addEventListener('click', function(e) { e.stopPropagation(); closePopup(); });
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape' && toolPopup.style.display !== 'none') { closePopup(); } });
 function positionPopup() {
   document.getElementById('popupBody').style.maxHeight = (window.innerHeight - 64) + 'px';
 }
 let activeToolBadge = null;
+let activeEntry = null;
 document.addEventListener('click', function(e) {
   const badge = e.target.closest('.tool-badge.has-input');
   if (badge) {
@@ -5013,7 +5022,9 @@ document.addEventListener('click', function(e) {
     activeToolBadge = badge;
     const idx = parseInt(badge.getAttribute('data-tool-idx'));
     const entry = toolInputStore[idx];
+    activeEntry = entry || null;
     document.getElementById('popupTitle').textContent = entry ? entry.name : '';
+    document.getElementById('popupCopyResult').style.display = (entry && entry.result) ? '' : 'none';
     const bodyEl = document.getElementById('popupBody');
     bodyEl.textContent = '';
     if (entry) {
@@ -5039,6 +5050,35 @@ document.querySelectorAll('.msg-expand').forEach(el => {
 // Agent dispatch toggle
 document.querySelectorAll('.agent-toggle').forEach(el => {
   el.addEventListener('click', function() { this.classList.toggle('expanded'); });
+});
+
+// Copy helpers
+function copyToClipboard(text, btn, origHtml) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.innerHTML = origHtml; btn.classList.remove('copied'); }, 1500);
+  });
+}
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.msg-copy-btn');
+  if (!btn) return;
+  e.stopPropagation();
+  const idx = parseInt(btn.getAttribute('data-copy-idx'));
+  const text = msgs[idx] ? (msgs[idx].content || '') : '';
+  copyToClipboard(text, btn, '&#128203;');
+});
+document.getElementById('popupCopyCmd').addEventListener('click', function(e) {
+  e.stopPropagation();
+  if (!activeEntry) return;
+  const inp = activeEntry.input || {};
+  const text = activeEntry.name === 'Bash' && inp.command ? inp.command : JSON.stringify(inp, null, 2);
+  copyToClipboard(text, this, 'Copy Command');
+});
+document.getElementById('popupCopyResult').addEventListener('click', function(e) {
+  e.stopPropagation();
+  if (!activeEntry || !activeEntry.result) return;
+  copyToClipboard(activeEntry.result.content || '', this, 'Copy Result');
 });
 
 // Syntax highlighting
