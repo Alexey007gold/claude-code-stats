@@ -1432,7 +1432,7 @@ def build_plan_analysis(daily_cost_series, session_list):
     periods = []
     for ph in PLAN_HISTORY:
         start = ph["start"]
-        end = ph["end"] or today
+        end = ph.get("end") or today
         billing_day = ph.get("billing_day")
 
         # Split into monthly billing cycles if billing_day is set
