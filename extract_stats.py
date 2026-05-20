@@ -190,6 +190,10 @@ TEMPLATE_HTML = Path(__file__).parent / "dashboard_template.html"
 # ── Plan Configuration (from config.json) ────────────────────────────────
 PLAN_HISTORY = CONFIG.get("plan_history", [])
 
+# Project dirs matching any of these substrings will have their stats included in
+# the dashboard but will NOT get individual session HTML files generated.
+SKIP_SESSION_PAGES_FOR = CONFIG.get("skip_session_pages_for", [])
+
 # ── Pricing (USD per 1M tokens) ───────────────────────────────────────────
 PRICING = {
     # Claude 4.7
@@ -4564,6 +4568,10 @@ def generate_session_pages(sessions, session_list, history=None, dirty_session_i
     for sess_data in session_list:
         sid = sess_data["session_id"]
         project_dir = sess_data.get("project_dir", "")
+
+        # Skip projects configured to exclude from per-session HTML output
+        if SKIP_SESSION_PAGES_FOR and any(p in project_dir for p in SKIP_SESSION_PAGES_FOR):
+            continue
 
         # Skip regeneration if session is unchanged and HTML already exists
         out_path = sessions_dir / f"{sid}.html"

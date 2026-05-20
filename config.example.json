@@ -27,5 +27,6 @@
     "claude_dir_name": ".claude-windows",
     "dot_claude_json_name": ".claude-windows.json"
   },
-  "additional_sources": []
+  "additional_sources": [],
+  "skip_session_pages_for": []
 }
