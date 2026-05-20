@@ -183,6 +183,8 @@ VERSION = "0.8.2"
 OUTPUT_DIR = Path(__file__).parent / "public"
 DASHBOARD_DATA = OUTPUT_DIR / "dashboard_data.json"
 DASHBOARD_HTML = OUTPUT_DIR / "index.html"
+PARSE_CACHE_PATH = OUTPUT_DIR / "parse_cache.json"
+PARSE_CACHE_VERSION = 2
 TEMPLATE_HTML = Path(__file__).parent / "dashboard_template.html"
 
 # ── Plan Configuration (from config.json) ────────────────────────────────
@@ -337,6 +339,35 @@ def load_stats_cache():
             if key not in ("totalSessions", "totalMessages"):
                 merged[key] = val
     return merged
+
+
+def load_parse_cache():
+    """Load the incremental parse cache; return empty dict on any error or version mismatch."""
+    if not PARSE_CACHE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PARSE_CACHE_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if data.get("version") != PARSE_CACHE_VERSION or data.get("template_version") != VERSION:
+        return {}
+    return data.get("entries", {})
+
+
+def save_parse_cache(entries):
+    """Persist the incremental parse cache to disk."""
+    try:
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        PARSE_CACHE_PATH.write_text(
+            json.dumps(
+                {"version": PARSE_CACHE_VERSION, "template_version": VERSION, "entries": entries},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        print(f"  WARNING: could not write parse cache: {e}")
 
 
 def load_dot_claude():
@@ -870,8 +901,23 @@ def _categorize_error(msg: str, tool_name: str) -> str:
     return "other"
 
 
-def parse_session_transcripts():
+def _make_cacheable(sess):
+    """Convert a parsed session dict to a JSON-serialisable form for the parse cache."""
+    result = {}
+    for k, v in sess.items():
+        if k == "_tool_id_map":
+            continue
+        result[k] = dict(v) if isinstance(v, defaultdict) else v
+    return result
+
+
+def parse_session_transcripts(parse_cache=None):
     """Parse all session JSONL transcripts from all sources."""
+    if parse_cache is None:
+        parse_cache = {}
+    updated_cache = {}
+    dirty_session_ids = set()
+
     sessions = {}  # session_id -> session_data
     total_files = 0
     total_lines = 0
@@ -921,8 +967,11 @@ def parse_session_transcripts():
                 file_session_id = jsonl_file.stem
                 if sudo_user:
                     file_size = sudo_file_size(jsonl_file, sudo_user)
+                    file_mtime = 0.0
                 else:
-                    file_size = jsonl_file.stat().st_size
+                    _fstat = jsonl_file.stat()
+                    file_size = _fstat.st_size
+                    file_mtime = _fstat.st_mtime
 
                 # Detect subagent sessions
                 is_subagent = "/subagents/" in str(jsonl_file)
@@ -934,6 +983,17 @@ def parse_session_transcripts():
                 if file_session_id in sessions and source_label == SOURCE_LABEL:
                     # Same session file in both sources — skip duplicate
                     continue
+
+                # Incremental cache check (non-sudo only)
+                if not sudo_user:
+                    _abs = str(jsonl_file)
+                    _cached = parse_cache.get(_abs)
+                    if (_cached
+                            and _cached.get("mtime") == file_mtime
+                            and _cached.get("size") == file_size):
+                        sessions[_cached["session_id"]] = _cached["data"]
+                        updated_cache[_abs] = _cached
+                        continue
 
                 try:
                     if sudo_user:
@@ -1180,6 +1240,18 @@ def parse_session_transcripts():
 
                 except Exception as e:
                     print(f"      ERROR reading {jsonl_file.name}: {e}")
+                else:
+                    # Cache the freshly parsed session so future runs can skip it
+                    if not sudo_user:
+                        _sess = sessions.get(file_session_id)
+                        if _sess is not None:
+                            updated_cache[str(jsonl_file)] = {
+                                "mtime": file_mtime,
+                                "size": file_size,
+                                "session_id": file_session_id,
+                                "data": _make_cacheable(_sess),
+                            }
+                            dirty_session_ids.add(file_session_id)
 
     # Link subagents to parent sessions and remove from top-level
     subagent_ids = [sid for sid, s in sessions.items() if s.get("is_subagent")]
@@ -1197,13 +1269,17 @@ def parse_session_transcripts():
                 "messages": sub["message_count"],
                 "tools": dict(sub["tools"]),
             })
+            if sub_id in dirty_session_ids:
+                dirty_session_ids.add(parent_id)
         del sessions[sub_id]
 
     migration_count = sum(1 for s in sessions.values() if s.get("source") == MIGRATION_LABEL)
     current_count = sum(1 for s in sessions.values() if s.get("source") == SOURCE_LABEL)
+    cached_count = len(sessions) - len(dirty_session_ids)
     print(f"  Parsed {total_files} files, {total_lines} lines, {len(sessions)} sessions"
-          f" (migration: {migration_count}, current: {current_count})")
-    return sessions
+          f" (migration: {migration_count}, current: {current_count},"
+          f" cached: {cached_count}, new/changed: {len(dirty_session_ids)})")
+    return sessions, dirty_session_ids, updated_cache
 
 
 def extract_session_messages(session_id, project_dir_name):
@@ -4472,7 +4548,7 @@ def build_session_flow(messages):
     return {"agents": agents, "events": events, "edges": edges}
 
 
-def generate_session_pages(sessions, session_list, history=None):
+def generate_session_pages(sessions, session_list, history=None, dirty_session_ids=None):
     """Generate individual HTML pages for each session."""
     sessions_dir = OUTPUT_DIR / "sessions"
     sessions_dir.mkdir(exist_ok=True)
@@ -4484,9 +4560,16 @@ def generate_session_pages(sessions, session_list, history=None):
             history_by_session[entry["sessionId"]].append(entry)
 
     count = 0
+    count_skipped = 0
     for sess_data in session_list:
         sid = sess_data["session_id"]
         project_dir = sess_data.get("project_dir", "")
+
+        # Skip regeneration if session is unchanged and HTML already exists
+        out_path = sessions_dir / f"{sid}.html"
+        if dirty_session_ids is not None and sid not in dirty_session_ids and out_path.exists():
+            count_skipped += 1
+            continue
         messages = extract_session_messages(sid, project_dir)
 
         # For history-only sessions, build synthetic messages from history
@@ -4519,12 +4602,12 @@ def generate_session_pages(sessions, session_list, history=None):
         html = html.replace('"__FLOW_DATA__"', flow_json)
         html = html.replace('__VERSION__', VERSION)
 
-        out_path = sessions_dir / f"{sid}.html"
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(html)
         count += 1
 
-    print(f"  Generated {count} session pages in {sessions_dir}")
+    skip_msg = f", {count_skipped} skipped (unchanged)" if count_skipped else ""
+    print(f"  Generated {count} session pages in {sessions_dir}{skip_msg}")
 
 
 def _get_session_html_template():
@@ -7030,7 +7113,9 @@ def main():
     print(f"  User prompts: {len(history)}")
 
     print("\n[4/10] Parsing session transcripts...")
-    sessions = parse_session_transcripts()
+    parse_cache = load_parse_cache()
+    sessions, dirty_session_ids, updated_cache = parse_session_transcripts(parse_cache)
+    save_parse_cache(updated_cache)
 
     print("\n[5/10] Loading plans...")
     plans = load_plans()
@@ -7072,7 +7157,7 @@ def main():
     )
 
     print(f"\nGenerating session pages...")
-    generate_session_pages(sessions, data["sessions"], history=history)
+    generate_session_pages(sessions, data["sessions"], history=history, dirty_session_ids=dirty_session_ids)
 
     print(f"\nGenerating project pages...")
     project_slugs = generate_project_pages(data["sessions"], data=data)
