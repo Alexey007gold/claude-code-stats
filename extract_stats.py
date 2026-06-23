@@ -184,7 +184,7 @@ OUTPUT_DIR = Path(__file__).parent / "public"
 DASHBOARD_DATA = OUTPUT_DIR / "dashboard_data.json"
 DASHBOARD_HTML = OUTPUT_DIR / "index.html"
 PARSE_CACHE_PATH = OUTPUT_DIR / "parse_cache.json"
-PARSE_CACHE_VERSION = 2
+PARSE_CACHE_VERSION = 3
 TEMPLATE_HTML = Path(__file__).parent / "dashboard_template.html"
 
 # ── Plan Configuration (from config.json) ────────────────────────────────
@@ -912,6 +912,11 @@ def _make_cacheable(sess):
         if k == "_tool_id_map":
             continue
         result[k] = dict(v) if isinstance(v, defaultdict) else v
+    # "subagents" is derived by the post-parse linking phase, not during file
+    # parsing. Persisting it would alias the live list that linking mutates,
+    # causing the cached array to grow by one full set on every run. Always
+    # store an independent empty list; linking rebuilds it each run.
+    result["subagents"] = []
     return result
 
 
@@ -995,7 +1000,13 @@ def parse_session_transcripts(parse_cache=None):
                     if (_cached
                             and _cached.get("mtime") == file_mtime
                             and _cached.get("size") == file_size):
-                        sessions[_cached["session_id"]] = _cached["data"]
+                        # Keep the cached subagents list empty (it's rebuilt by
+                        # linking) and give this run's session its own list, so
+                        # linking mutations never leak back into the saved cache.
+                        _cached["data"]["subagents"] = []
+                        _sess_obj = dict(_cached["data"])
+                        _sess_obj["subagents"] = []
+                        sessions[_cached["session_id"]] = _sess_obj
                         updated_cache[_abs] = _cached
                         continue
 
@@ -1279,10 +1290,12 @@ def parse_session_transcripts(parse_cache=None):
 
     migration_count = sum(1 for s in sessions.values() if s.get("source") == MIGRATION_LABEL)
     current_count = sum(1 for s in sessions.values() if s.get("source") == SOURCE_LABEL)
-    cached_count = len(sessions) - len(dirty_session_ids)
+    # Count only surviving top-level sessions (subagents were folded into parents)
+    dirty_top_level = sum(1 for sid in sessions if sid in dirty_session_ids)
+    cached_count = len(sessions) - dirty_top_level
     print(f"  Parsed {total_files} files, {total_lines} lines, {len(sessions)} sessions"
           f" (migration: {migration_count}, current: {current_count},"
-          f" cached: {cached_count}, new/changed: {len(dirty_session_ids)})")
+          f" cached: {cached_count}, new/changed: {dirty_top_level})")
     return sessions, dirty_session_ids, updated_cache
 
 
