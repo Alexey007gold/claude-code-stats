@@ -207,6 +207,11 @@ PRICING = {
         "cache_read": 1, "cache_write_5m": 12.50, "cache_write_1h": 20.00,
         "display": "Mythos 5"
     },
+    "claude-opus-5": {
+        "input": 5.00, "output": 25.00,
+        "cache_read": 0.50, "cache_write_5m": 6.25, "cache_write_1h": 10.00,
+        "display": "Opus 5"
+    },
     "claude-sonnet-5": {
         "input": 3.00, "output": 15.00,
         "cache_read": 0.30, "cache_write_5m": 3.75, "cache_write_1h": 6.00,
@@ -2684,8 +2689,8 @@ function escHtml(s) {
 
 const MODEL_COLORS = {
   'Fable 5': '#f59e0b', 'Mythos 5': '#ec4899',
-  'Opus 4.8': '#ddd6fe', 'Opus 4.7': '#c084fc', 'Opus 4.6': '#a855f7', 'Opus 4.5': '#7c3aed',
-  'Opus 4.1': '#6d28d9', 'Opus 4': '#5b21b6', 'Opus 3': '#4c1d95',
+  'Opus 5': '#e9d5ff', 'Opus 4.8': '#d8b4fe', 'Opus 4.7': '#c084fc', 'Opus 4.6': '#a855f7', 'Opus 4.5': '#9333ea',
+  'Opus 4.1': '#7e22ce', 'Opus 4': '#6b21a8', 'Opus 3': '#581c87',
   'Sonnet 5': '#93c5fd', 'Sonnet 4.6': '#60a5fa', 'Sonnet 4.5': '#3b82f6', 'Sonnet 4': '#2563eb', 'Sonnet 3.7': '#1d4ed8',
   'Haiku 4.5': '#22c55e', 'Haiku 3.5': '#16a34a', 'Haiku 3': '#15803d',
   'Unknown': '#6b7280'
