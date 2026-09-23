@@ -196,6 +196,12 @@ SKIP_SESSION_PAGES_FOR = CONFIG.get("skip_session_pages_for", [])
 
 # ── Pricing (USD per 1M tokens) ───────────────────────────────────────────
 PRICING = {
+    # Claude 5.5
+    "claude-opus-5-5": {
+        "input": 4.00, "output": 20.00,
+        "cache_read": 0.20, "cache_write_5m": 5.00, "cache_write_1h": 8.00,
+        "display": "Opus 5.5"
+    },
     # Claude 5
     "claude-fable-5": {
         "input": 10.00, "output": 50.00,
@@ -2689,8 +2695,8 @@ function escHtml(s) {
 
 const MODEL_COLORS = {
   'Fable 5': '#f59e0b', 'Mythos 5': '#ec4899',
-  'Opus 5': '#e9d5ff', 'Opus 4.8': '#d8b4fe', 'Opus 4.7': '#c084fc', 'Opus 4.6': '#a855f7', 'Opus 4.5': '#9333ea',
-  'Opus 4.1': '#7e22ce', 'Opus 4': '#6b21a8', 'Opus 3': '#581c87',
+  'Opus 5.5': '#f3e8ff', 'Opus 5': '#e9d5ff', 'Opus 4.8': '#d8b4fe', 'Opus 4.7': '#c084fc', 'Opus 4.6': '#a855f7',
+  'Opus 4.5': '#9333ea', 'Opus 4.1': '#7e22ce', 'Opus 4': '#6b21a8', 'Opus 3': '#581c87',
   'Sonnet 5': '#93c5fd', 'Sonnet 4.6': '#60a5fa', 'Sonnet 4.5': '#3b82f6', 'Sonnet 4': '#2563eb', 'Sonnet 3.7': '#1d4ed8',
   'Haiku 4.5': '#22c55e', 'Haiku 3.5': '#16a34a', 'Haiku 3': '#15803d',
   'Unknown': '#6b7280'
